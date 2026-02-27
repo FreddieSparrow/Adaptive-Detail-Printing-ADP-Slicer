@@ -555,6 +555,17 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
             expand_merge_surfaces(this->fill_surfaces.surfaces, stBottomBridge, expansion_zones, closing_radius, Geometry::deg2rad(custom_angle)) :
             expand_bridges_detect_orientations(this->fill_surfaces.surfaces, expansion_zones, closing_radius);
         BOOST_LOG_TRIVIAL(trace) << "Processing external surface, detecting bridges - done";
+        // Clip bridge surfaces to the model boundary to prevent void extension
+        // from the closing_ex operation in merge_bridges/expand_merge_surfaces.
+        {
+            Surfaces clipped;
+            for (const Surface &s : bridges.surfaces) {
+                ExPolygons trimmed = intersection_ex(ExPolygons{s.expolygon}, this->layer()->lslices);
+                for (ExPolygon &ep : trimmed)
+                    clipped.emplace_back(s, std::move(ep));
+            }
+            bridges.surfaces = std::move(clipped);
+        }
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
         {
             static int iRun = 0;
