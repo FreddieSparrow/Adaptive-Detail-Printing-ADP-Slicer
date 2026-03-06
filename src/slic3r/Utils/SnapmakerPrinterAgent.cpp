@@ -1,4 +1,5 @@
 #include "SnapmakerPrinterAgent.hpp"
+#include "FilamentMatcher.hpp"
 #include "Http.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
@@ -141,10 +142,14 @@ bool SnapmakerPrinterAgent::fetch_filament_info(std::string dev_id)
         if (tray.has_filament) {
             tray.tray_type     = combine_filament_type(safe_at(filament_type, i, empty_str),
                                                        safe_at(filament_sub_type, i, empty_str));
-            auto* bundle = GUI::wxGetApp().preset_bundle;
-            tray.tray_info_idx = bundle
-                ? bundle->filaments.filament_id_by_type(tray.tray_type)
-                : map_filament_type_to_generic_id(tray.tray_type);
+            // Snapmaker reports type + sub_type (e.g. "PLA" + "CF" -> "PLA-CF")
+            // but no vendor name or color, so tiers 1-3 are skipped.
+            // If Snapmaker NFC data gains vendor/filament name fields, populate
+            // prefix (e.g. "SM_J1") and vendor_name/filament_name here to
+            // enable richer matching.
+            FilamentMatchInput match_input;
+            match_input.tray_type = tray.tray_type;
+            tray.tray_info_idx = FilamentMatcher::resolve(match_input);
             tray.tray_color    = safe_at(filament_color, i, default_color);
 
             // Extract NFC temperature data if available
