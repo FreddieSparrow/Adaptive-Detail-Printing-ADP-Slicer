@@ -62,6 +62,7 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/PresetSwitchLogic.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -9394,10 +9395,12 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
                 }
             }
         }
-        //BBS
-        //wxWindowUpdateLocker noUpdates1(sidebar->print_panel());
-        wxWindowUpdateLocker noUpdates2(sidebar->filament_panel());
-        wxGetApp().get_tab(preset_type)->select_preset(preset_name);
+        if (should_run_generic_preset_selection(preset_type, select_preset, sidebar->is_multifilament())) {
+            //BBS
+            //wxWindowUpdateLocker noUpdates1(sidebar->print_panel());
+            wxWindowUpdateLocker noUpdates2(sidebar->filament_panel());
+            wxGetApp().get_tab(preset_type)->select_preset(preset_name);
+        }
     }
 
     // update plater with new config
