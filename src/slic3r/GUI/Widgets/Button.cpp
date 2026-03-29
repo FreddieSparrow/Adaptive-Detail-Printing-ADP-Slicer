@@ -200,6 +200,7 @@ void Button::SetStyle(const ButtonStyle style, const ButtonType type)
     else if (type == ButtonType::Parameter) {
         this->SetMinSize(FromDIP(wxSize(120,26)));
         this->SetSize(FromDIP(wxSize(120,26)));
+        this->SetMaxSize(FromDIP(wxSize(120,26)));
         this->SetCornerRadius(this->FromDIP(4));
         this->SetFont(Label::Body_14);
     }
@@ -293,9 +294,11 @@ void Button::render(wxDC& dc)
     else
         icon = inactive_icon;
     wxSize padding = this->paddingSize;
-    int spacing = 5;
+
     // Wrap text
     auto text = GetLabel();
+    int spacing = text.IsEmpty() ? 0 : 5; // ORCA dont add spacing when no text in use. fixes aligning on Linux
+
     if (vertical && textSize.x + padding.x * 2 > size.x) {
         Label::split_lines(dc, size.x - padding.x * 2, text, text, 2);
         textSize = dc.GetMultiLineTextExtent(text);
@@ -357,22 +360,18 @@ void Button::render(wxDC& dc)
         } else {
             if (pt.x + textSize.x > size.x)
                 text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, size.x - pt.x);
-            pt.y += (rcContent.height - textSize.y) / 2;
+
+            // ORCA Compute accurate text block height using font metrics
+            // GetTextExtent and GetMultiLineTextExtent returns a height that includes external leading 
+            // On Mac, external leading value is significantly larger than on Windows/Linux due to how CoreText reports font metrics.
+            wxFontMetrics fm = dc.GetFontMetrics();
+            int lineHeight   = fm.ascent + fm.descent;
+            int lineCount    = text.IsEmpty() ? 0 : (text.Freq('\n') + 1);
+            int blockHeight  = lineCount > 0 ? lineHeight * lineCount + fm.externalLeading * (lineCount - 1) : 0;
+            pt.y += (rcContent.height - blockHeight) / 2;
+            pt.y -= fm.externalLeading;
         }
         dc.SetTextForeground(text_color.colorForStates(states));
-#if 0
-        dc.SetBrush(*wxLIGHT_GREY);
-        dc.SetPen(wxPen(*wxLIGHT_GREY));
-        dc.DrawRectangle(pt, textSize.GetSize());
-#endif
-#ifdef __WXOSX__
-        pt.y -= this->textSize.x / 2;
-#endif
-#ifdef __APPLE__
-        if (Slic3r::is_mac_version_15()) {
-        pt.y -= FromDIP(1);
-    }
-#endif
         dc.DrawText(text, pt);
     }
 }
@@ -380,15 +379,36 @@ void Button::render(wxDC& dc)
 void Button::messureSize()
 {
     wxClientDC dc(this);
-    dc.GetTextExtent(GetLabel(), &textSize.width, &textSize.height, &textSize.x, &textSize.y);
+    const wxString text = GetLabel();
+    int spacing = text.IsEmpty() ? 0 : 5;  // ORCA dont add spacing when no text in use. fixes aligning on Linux
+
+    dc.GetTextExtent(text, &textSize.width, &textSize.height, &textSize.x, &textSize.y);
+
+    // ORCA exclude external leading from calculations
+    wxFontMetrics fm = dc.GetFontMetrics();
+    int lineHeight   = fm.ascent + fm.descent;
+    int lineCount    = text.IsEmpty() ? 0 : (text.Freq('\n') + 1);
+    int blockHeight  = lineCount > 0 ? lineHeight * lineCount + fm.externalLeading * (lineCount - 1) : 0;
+    textSize.SetHeight(blockHeight);
+
+    if(lineCount > 1) {
+        int ml_width = 0;
+        for (const wxString& line : wxSplit(text, '\n')) {
+            int lineWidth = 0;
+            dc.GetTextExtent(line, &lineWidth, nullptr);
+            ml_width = wxMax(lineWidth, ml_width);
+        }
+        textSize.SetWidth(ml_width);
+    }
+
     wxSize szContent = textSize.GetSize();
     if (this->active_icon.bmp().IsOk()) {
         if (szContent.y > 0) {
             //BBS norrow size between text and icon
             if (vertical)
-                szContent.y += 5;
+                szContent.y += spacing; // ORCA use spacing instead static value
             else
-                szContent.x += 5;
+                szContent.x += spacing; // ORCA use spacing instead static value
         }
         wxSize szIcon = this->active_icon.GetBmpSize();
         if (vertical) {
