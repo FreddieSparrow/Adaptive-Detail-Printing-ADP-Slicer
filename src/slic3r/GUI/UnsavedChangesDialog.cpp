@@ -21,6 +21,10 @@
 #include "MainFrame.hpp"
 #include "MsgDialog.hpp"
 
+//#define FTS_FUZZY_MATCH_IMPLEMENTATION
+//#include "fts_fuzzy_match.h"
+
+#include "BitmapCache.hpp"
 #include "PresetComboBoxes.hpp"
 #include "Widgets/RoundedRectangle.hpp"
 #include "Widgets/CheckBox.hpp"
@@ -2127,6 +2131,8 @@ void DiffPresetDialog::show(Preset::Type type /* = Preset::TYPE_INVALID*/)
 
 void DiffPresetDialog::update_presets(Preset::Type type)
 {
+    m_pr_technology = m_preset_bundle_left.get()->printers.get_edited_preset().printer_technology();
+
     update_bundles_from_app();
     update_controls_visibility(type);
 
@@ -2280,6 +2286,8 @@ void DiffPresetDialog::on_dpi_changed(const wxRect&)
 {
     int em = em_unit();
 
+    msw_buttons_rescale(this, em, { wxID_CANCEL});
+
     const wxSize& size = wxSize(80 * em, 30 * em);
     SetMinSize(size);
 
@@ -2308,7 +2316,6 @@ void DiffPresetDialog::on_sys_color_changed()
         preset_combos.equal_bmp->msw_rescale();
         preset_combos.presets_right->msw_rescale();
     }
-
     // msw_rescale updates just icons, so use it
     m_tree->Rescale();
     Refresh();
