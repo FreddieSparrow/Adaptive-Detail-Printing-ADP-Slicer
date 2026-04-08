@@ -26,6 +26,7 @@ function usage() {
     echo "   -u: install system dependencies (asks for sudo password; build prerequisite)"
     echo "   -l: use Clang instead of GCC (default: GCC)"
     echo "   -L: use ld.lld as linker (if available)"
+    echo "   -m: use mold as linker (if available)"
     echo "For a first use, you want to './${SCRIPT_NAME} -u'"
     echo "   and then './${SCRIPT_NAME} -dsi'"
 }
@@ -35,7 +36,7 @@ SLIC3R_PRECOMPILED_HEADERS="ON"
 unset name
 BUILD_DIR=build
 BUILD_CONFIG=Release
-while getopts ":1j:bcCdDehiprstulL" opt ; do
+while getopts ":1j:bcCdDehiprstulLm" opt ; do
   case ${opt} in
     1 )
         export CMAKE_BUILD_PARALLEL_LEVEL=1
@@ -89,6 +90,9 @@ while getopts ":1j:bcCdDehiprstulL" opt ; do
         ;;
     L )
         USE_LLD="1"
+        ;;
+    m )
+        USE_MOLD="1"
         ;;
     * )
 	echo "Unknown argument '${opt}', aborting."
@@ -202,6 +206,22 @@ if [[ -n "${USE_LLD}" ]] ; then
     fi
 fi
 
+if [[ -n "${USE_MOLD}" ]] ; then
+    if command -v mold >/dev/null 2>&1 ; then
+        MOLD_BIN=$(command -v mold)
+        export CMAKE_LLD_LINKER_ARGS=(-DCMAKE_LINKER="${MOLD_BIN}" -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=mold -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=mold)
+    else
+        echo "Error: mold not found. Please install the 'mold' package (e.g., sudo apt install mold) or omit -m."
+        exit 1
+    fi
+fi
+
+export CMAKE_CACHE_ARGS=()
+if command -v ccache >/dev/null 2>&1 ; then
+        CMAKE_CACHE=$(command -v ccache)
+        export CMAKE_CACHE_ARGS=(-DCMAKE_CXX_COMPILER_LAUNCHER="${CMAKE_CACHE}")
+fi
+
 if [[ -n "${BUILD_DEPS}" ]] ; then
     echo "Configuring dependencies..."
     read -r -a BUILD_ARGS <<< "${DEPS_EXTRA_BUILD_ARGS}"
@@ -214,7 +234,7 @@ if [[ -n "${BUILD_DEPS}" ]] ; then
         BUILD_ARGS+=(-DCMAKE_BUILD_TYPE="${BUILD_CONFIG}")
     fi
 
-    print_and_run cmake -S deps -B deps/$BUILD_DIR "${CMAKE_C_CXX_COMPILER_CLANG[@]}" "${CMAKE_LLD_LINKER_ARGS[@]}" -G Ninja "${COLORED_OUTPUT}" "${BUILD_ARGS[@]}"
+    print_and_run cmake -S deps -B deps/$BUILD_DIR "${CMAKE_C_CXX_COMPILER_CLANG[@]}" "${CMAKE_LLD_LINKER_ARGS[@]}" "${CMAKE_CACHE_ARGS[@]}" -G Ninja "${COLORED_OUTPUT}" "${BUILD_ARGS[@]}"
     print_and_run cmake --build deps/$BUILD_DIR
 fi
 
@@ -234,7 +254,7 @@ if [[ -n "${BUILD_ORCA}" ]] || [[ -n "${BUILD_TESTS}" ]] ; then
         BUILD_ARGS+=(-DORCA_UPDATER_SIG_KEY="${ORCA_UPDATER_SIG_KEY}")
     fi
 
-    print_and_run cmake -S . -B $BUILD_DIR "${CMAKE_C_CXX_COMPILER_CLANG[@]}" "${CMAKE_LLD_LINKER_ARGS[@]}" -G "Ninja Multi-Config" \
+    print_and_run cmake -S . -B $BUILD_DIR "${CMAKE_C_CXX_COMPILER_CLANG[@]}" "${CMAKE_LLD_LINKER_ARGS[@]}" "${CMAKE_CACHE_ARGS[@]}" -G "Ninja Multi-Config" \
 -DSLIC3R_PCH=${SLIC3R_PRECOMPILED_HEADERS} \
 -DORCA_TOOLS=ON \
 "${COLORED_OUTPUT}" \
