@@ -2142,6 +2142,27 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
         result->filename = path;
     }
 
+    // Check for filaments that have a filament ID, but no spool ID
+    for (int i = 0; i < m_config.spoolman_filament_id.size(); ++i) {
+        if (m_config.spoolman_filament_id.get_at(i) > 0 && m_config.spoolman_spool_id.get_at(i) < 1) {
+            std::string msg = (boost::format(_("Filament %1% has a valid filament ID, but an invalid spool ID. Spoolman consumption will not be "
+                                     "available for this filament.")) % m_config.filament_settings_id.get_at(i)).str();
+            print->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, msg);
+        }
+    }
+
+    // Check the consumption of filament against the remaining filament as reported by Spoolman
+    for (const auto& est : print->get_spoolman_filament_consumption_estimates()) {
+        double remaining_length   = print->config().filament_remaining_length.get_at(est.print_config_idx);
+        double remaining_weight   = print->config().filament_remaining_weight.get_at(est.print_config_idx);
+
+        if (est.est_used_length > remaining_length || est.est_used_weight > remaining_weight) {
+            std::string msg = (boost::format(_("Filament %1% does not have enough material for the print. Used: %2$.2f m, %3$.2f g, Remaining: %4$.2f m, %5$.2f g")) %
+                                         est.filament_name % (est.est_used_length * 0.001) % est.est_used_weight % (remaining_length * 0.001) % remaining_weight).str();
+            print->active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL, msg, PrintStateBase::SlicingNotificationType::SlicingNotEnoughFilament);
+        }
+    }
+
     //BBS: add some log for error output
     BOOST_LOG_TRIVIAL(debug) << boost::format("Finished processing gcode to %1% ") % path_tmp;
 
@@ -7420,6 +7441,30 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     if (!m_writer.need_toolchange(new_filament_id))
         return "";
 
+    auto select_spoolman_spool = [&]() -> std::string {
+        std::string gcode;
+        if (m_config.gcode_flavor != gcfKlipper
+            || !m_print->m_spoolman_enabled
+            || !m_config.handles_spoolman_consumption)
+            return {};
+
+        // Only use the macros if both are valid
+        if (m_config.spoolman_clear_spool_macro.empty() || m_config.spoolman_set_spool_macro.empty())
+            return {};
+
+        // Add macros
+        gcode += m_config.spoolman_clear_spool_macro.value + '\n';
+
+        const auto& set_macro = m_config.spoolman_set_spool_macro.value;
+        if (set_macro.find("%id%") == std::string::npos)
+            throw SlicingError("The option 'spoolman_set_spool_macro' is not empty and does not contain a '%id%' identifier to replace.");
+        auto spool_id = m_config.spoolman_spool_id.get_at(new_filament_id);
+        if (spool_id > 0)
+            gcode += boost::replace_all_copy(set_macro, "%id%", std::to_string(spool_id)) + '\n';
+
+        return gcode;
+    };
+
     // if we are running a single-extruder setup, just set the extruder and return nothing
     if (!m_writer.multiple_extruders) {
         this->placeholder_parser().set("current_extruder", new_filament_id);
@@ -7450,6 +7495,8 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
             m_pa_processor->resetPreviousPA(m_config.pressure_advance.get_at(new_filament_id));
         }
 
+        // Orca: add Spoolman macros
+        gcode += select_spoolman_spool();
         gcode += m_writer.toolchange(new_filament_id);
         return gcode;
     }
@@ -7677,6 +7724,9 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
             }
         }
     }
+
+    // Orca: add Spoolman macros
+    gcode += select_spoolman_spool();
 
     // BBS. Reset old extruder E-value.
     // Keep retract length because Custom GCode will guarantee retract length be the same as toolchange

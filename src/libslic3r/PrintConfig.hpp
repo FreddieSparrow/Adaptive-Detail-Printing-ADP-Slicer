@@ -577,14 +577,14 @@ double min_object_distance(const ConfigBase &cfg);
 // The dynamic configuration is also used to store user modifications of the print global parameters,
 // so the modified configuration values may be diffed against the active configuration
 // to invalidate the proper slicing resp. g-code generation processing steps.
-class DynamicPrintConfig : public DynamicConfig
+class DynamicPrintConfig : public DynamicConfigWithDef
 {
 public:
     DynamicPrintConfig() {}
-    DynamicPrintConfig(const DynamicPrintConfig &rhs) : DynamicConfig(rhs) {}
-    DynamicPrintConfig(DynamicPrintConfig &&rhs) noexcept : DynamicConfig(std::move(rhs)) {}
+    DynamicPrintConfig(const DynamicPrintConfig &rhs) : DynamicConfigWithDef(rhs) {}
+    DynamicPrintConfig(DynamicPrintConfig &&rhs) noexcept : DynamicConfigWithDef(std::move(rhs)) {}
     explicit DynamicPrintConfig(const StaticPrintConfig &rhs);
-    explicit DynamicPrintConfig(const ConfigBase &rhs) : DynamicConfig(rhs) {}
+    explicit DynamicPrintConfig(const ConfigBase &rhs) : DynamicConfigWithDef(rhs) {}
 
     DynamicPrintConfig& operator=(const DynamicPrintConfig &rhs) { DynamicConfig::operator=(rhs); return *this; }
     DynamicPrintConfig& operator=(DynamicPrintConfig &&rhs) noexcept { DynamicConfig::operator=(std::move(rhs)); return *this; }
@@ -1258,6 +1258,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               fan_kickstart))
     ((ConfigOptionBool,                fan_speedup_overhangs))
     ((ConfigOptionFloat,               fan_speedup_time))
+    ((ConfigOptionStrings,             filament_settings_id))
     ((ConfigOptionFloats,              filament_diameter))
     ((ConfigOptionBoolsNullable,       filament_adaptive_volumetric_speed))
     ((ConfigOptionStrings,             volumetric_speed_coefficients))
@@ -1402,6 +1403,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,              small_area_infill_flow_compensation_model))
 
     ((ConfigOptionBool,                has_scarf_joint_seam))
+    ((ConfigOptionInts,                spoolman_filament_id))
+    ((ConfigOptionInts,                spoolman_spool_id))
+    ((ConfigOptionFloats,              filament_remaining_weight))
+    ((ConfigOptionFloats,              filament_remaining_length))
+    ((ConfigOptionBool,                handles_spoolman_consumption))
+    ((ConfigOptionString,              spoolman_clear_spool_macro))
+    ((ConfigOptionString,              spoolman_set_spool_macro))
 )
 
 // This object is mapped to Perl as Slic3r::Config::Print.

@@ -1273,7 +1273,7 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     m_z_offset = gcode_result.z_offset;
 
     // load_toolpaths(gcode_result, build_volume, exclude_bounding_box);
-    
+
     // ORCA: Only show filament/color print preview if more than one tool/extruder is actually used in the toolpaths.
     // Only reset back to Toolpaths (FeatureType) if we are currently in ColorPrint and this load is single-tool.
     if (m_viewer.get_used_extruders_count() > 1) {
