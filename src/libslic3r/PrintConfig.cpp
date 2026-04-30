@@ -4568,6 +4568,35 @@ void PrintConfigDef::init_fff_params()
     // start and end point is from the change_filament_gcode
     def->set_default_value(new ConfigOptionPoints{Vec2d(30, -3), Vec2d(54, 245)});
 
+    def          = this->add("cut_corners", coBool);
+    def->label   = L("Cut corners");
+    def->tooltip = L("Makes the corners flawless. \n"
+                     "Eliminates excess material at the ends and their junctions of any printed line. " 
+                     "Positive moment is especially noticeable on the protruding corners of the model and the cleanliness of the complex surface. "
+                     "The actions of this option are repeat the small_area_flow_compensation with precision accuracy, but they do not cancel it for other elements of the printed model, such as perimeters and infills. "
+                     "This also affects to decrease the overflow of a solid infill (like as Archimedean Chords) if it consists of many small segments. \n"
+                     "This option eliminates overflow in the connection of two printed lines when excessive material is extruded at their ends. \n"
+                     "Cut corners are not supported for sloped lines and arc fitting and will be ignored on such objects. To better use this feature, disable arc_fitting support and do not use scarf seams. "
+                     "Since this option correctly forms the start and final ends of the seam, it is recommended to use regular seams with a gap of about the nozzle diameter or 100%. \n"  
+                     "To calibrate the shape of the resulting corners, it is recommended to disable any additional flow and speed shapers such as Jerk, Junction Deviation, Pressure Advance, and Input Shaping... "
+                     "The effect of this option does not depend on the print speed, but choose slow speeds for calibration to eliminate other factors that affect accuracy. "
+                     "The correct results will be on the side that is less affected by the resonance effect of the print head. "
+                     "After this calibration, adjust the settings according to the other items listed above, as well the overlapping of seams, infills and perimeters. ");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def           = this->add("cut_corners_overlap", coFloat);
+    def->label    = L("Cut corners overlap");
+    def->tooltip  = L("The offset coefficient of the protective zone near the corners which equal to the nozzle diameter. \n"
+                      "Mathematical calculations indicate an optimal value of 0.6 (2x of the difference between the circle area and the square once), but it can be ajusted depending on the material properties. \n"
+                      "If you select a value of 1.0, the corner overlap will be the same as when cut_corners is disabled, but the flow compensation will remain when overlapping lines at sharp angles. \n"
+                      "A smaller value rounds the protruding corners. A larger value compensates for the rounding. \n"
+                      "Default is 0.6. ");
+    def->min      = 0.;
+    def->max      = 3.;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.6));
+
     def = this->add("reduce_infill_retraction", coBool);
     def->label = L("Reduce infill retraction");
     def->tooltip = L("Don't retract when the travel is entirely within an infill area. That means the oozing can't been seen. "

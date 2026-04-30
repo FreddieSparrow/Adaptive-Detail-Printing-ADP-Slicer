@@ -2657,6 +2657,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
+        optgroup->append_single_option_line("cut_corners", "others_settings_g_code_output");
+        optgroup->append_single_option_line("cut_corners_overlap", "others_settings_g_code_output");
         optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");
         optgroup->append_single_option_line("gcode_add_line_number", "others_settings_g_code_output#add-line-number");
         optgroup->append_single_option_line("gcode_comments", "others_settings_g_code_output#verbose-g-code");

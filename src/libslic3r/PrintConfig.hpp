@@ -1085,6 +1085,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
     ((ConfigOptionFloat,                gap_infill_speed))
+    ((ConfigOptionBool,                 cut_corners))
+    ((ConfigOptionFloat,                cut_corners_overlap))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
     ((ConfigOptionPercent,              infill_wall_overlap))

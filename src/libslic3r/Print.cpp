@@ -168,6 +168,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "max_volumetric_extrusion_rate_slope",
         "max_volumetric_extrusion_rate_slope_segment_length",
         "extrusion_rate_smoothing_external_perimeter_only",
+        "cut_corners", 
+        "cut_corners_overlap",
         "reduce_infill_retraction",
         "filename_format",
         "retraction_minimum_travel",
