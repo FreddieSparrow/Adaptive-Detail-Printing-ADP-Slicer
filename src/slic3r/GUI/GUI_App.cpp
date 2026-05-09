@@ -4302,7 +4302,7 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
         input_file = dialog.GetPath();
 }
 
-wxString GUI_App::transition_tridid(int trid_id) const
+wxString GUI_App::transition_tridid(int trid_id, std::optional<int> /*total_extruder_count*/) const
 {
     if (trid_id == VIRTUAL_TRAY_MAIN_ID || trid_id == VIRTUAL_TRAY_DEPUTY_ID)
     {
@@ -7187,7 +7187,7 @@ bool GUI_App::load_language(wxString language, bool initial)
     m_imgui->set_language(into_u8(requested_language_code));
 
     //FIXME This is a temporary workaround, the correct solution is to switch to "C" locale during file import / export only.
-    //wxSetlocale(LC_NUMERIC, "C");
+    wxSetlocale(LC_NUMERIC, "C");
     Preset::update_suffix_modified((_L("*") + " ").ToUTF8().data());
     HintDatabase::get_instance().reinit();
 	return true;

@@ -62,6 +62,12 @@ std::string get_nozzle_volume_type_cloud_string(NozzleVolumeType nozzle_volume_t
     else if (nozzle_volume_type == NozzleVolumeType::nvtHighFlow) {
         return "high_flow";
     }
+    else if (nozzle_volume_type == NozzleVolumeType::nvtTPUHighFlow) {
+        return "tpu_high_flow";
+    }
+    else if (nozzle_volume_type == NozzleVolumeType::nvtHybrid) {
+        return "hybrid_flow";
+    }
     else {
         assert(false);
         return "";
@@ -997,6 +1003,16 @@ void print_ams_mapping_result(std::vector<FilamentInfo>& result)
         ::sprintf(buffer, "print_ams_mapping: F(%02d) -> A(%02d)", result[i].id+1, result[i].tray_id+1);
         BOOST_LOG_TRIVIAL(info) << std::string(buffer);
     }
+}
+
+bool SelectMachineDialog::use_dynamic_nozzle_map() const
+{
+    // Stub: BBL gates this on enable_filament_dynamic_map config +
+    // is_support_dynamic_nozzle_map() on the slicing result. Neither is
+    // ported in Orca yet — return false so the rack picker still shows
+    // for H2C (gated separately on GetNozzleRack()->IsSupported()) but
+    // the dynamic-map fast path stays off.
+    return false;
 }
 
 bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_,bool use_ams)
@@ -2515,10 +2531,8 @@ void SelectMachineDialog::on_send_print()
     m_print_job->task_ams_mapping2     = ams_mapping_array2;
     m_print_job->task_ams_mapping_info = ams_mapping_info;
 
-    /* build nozzles info for multi extruders printers */
-    if (build_nozzles_info(m_print_job->task_nozzles_info)) {
-        BOOST_LOG_TRIVIAL(error) << "build_nozzle_info errors";
-    }
+    /* build nozzles info for multi extruders printers (single-nozzle printers no-op and return false) */
+    build_nozzles_info(m_print_job->task_nozzles_info);
 
     m_print_job->sdcard_state = obj_->GetStorage()->get_sdcard_state();    
     m_print_job->has_sdcard =  wxGetApp().app_config->get("allow_abnormal_storage") == "true"
@@ -3965,7 +3979,7 @@ void SelectMachineDialog::reset_and_sync_ams_list()
                     m_mapping_popup.set_current_filament_id(extruder);
                     m_mapping_popup.set_tag_texture(materials[extruder]);
                     m_mapping_popup.set_send_win(this);//fix bug:fisrt click is not valid
-                    m_mapping_popup.update(obj_, m_ams_mapping_result);
+                    m_mapping_popup.update(obj_, m_ams_mapping_result, use_dynamic_nozzle_map(), m_print_type);
                     m_mapping_popup.Popup();
                 }
             }

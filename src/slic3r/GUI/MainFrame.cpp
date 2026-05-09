@@ -3244,7 +3244,7 @@ void MainFrame::init_menubar_as_editor()
         },
         "", nullptr, []() { return true; }, this);
 
-        append_menu_item(
+    append_menu_item(
         m_topbar->GetTopMenu(), wxID_ANY, _L("Preset Bundle") + "\t", "",
         [this](wxCommandEvent &) {
             // Orca: Use GUI_App::open_preferences instead of direct call so windows associations are updated on exit

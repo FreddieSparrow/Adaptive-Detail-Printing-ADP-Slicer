@@ -4292,6 +4292,18 @@ void TabFilament::toggle_options()
                         "filament_cooling_initial_speed", "filament_cooling_final_speed"})
             toggle_option(el, !is_BBL_printer);
 
+        // BBL: tower-interface filament params only apply to H2C/H2D/X2D-class printers.
+        // Hide the four lines on every other printer so the controls don't appear unused.
+        const std::string printer_model = printer_cfg.opt_string("printer_model");
+        const bool is_tower_interface_supported = printer_model.find("H2C") != std::string::npos
+                                                  || printer_model.find("H2D") != std::string::npos
+                                                  || printer_model.find("X2D") != std::string::npos;
+        for (auto el : {"filament_tower_interface_pre_extrusion_dist",
+                        "filament_tower_interface_pre_extrusion_length",
+                        "filament_tower_interface_purge_volume",
+                        "filament_tower_interface_print_temp"})
+            toggle_line(el, is_tower_interface_supported);
+
         bool multitool_ramming = m_config->opt_bool("filament_multitool_ramming", 0);
         toggle_option("filament_multitool_ramming_volume", multitool_ramming);
         toggle_option("filament_multitool_ramming_flow", multitool_ramming);
@@ -5156,6 +5168,19 @@ void TabPrinter::on_preset_loaded()
         if (use_default_nozzle_volume_type) {
             m_preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type")->values = current_printer.config.option<ConfigOptionEnumsGeneric>("default_nozzle_volume_type")->values;
         }
+    }
+
+    // BBL parity (port from BambuStudio Tab.cpp:5565): re-derive extruder_nozzle_stat
+    // from the printer's extruder_max_nozzle_count whenever a printer profile is
+    // loaded. Without this, the stat carries whatever was in the saved 3MF (or the
+    // default `1`) regardless of the printer's actual rack capacity, causing the
+    // firmware to reject the print on a hotend-quantity mismatch. Skipped when
+    // a manual override is active or when MQTT sync already populated it.
+    if (auto* max_nc = m_config->option<ConfigOptionIntsNullable>("extruder_max_nozzle_count");
+        max_nc && !max_nc->values.empty() &&
+        m_preset_bundle->extruder_nozzle_stat.get_nozzle_data_flag() != ExtruderNozzleStat::ndfMachine &&
+        !m_preset_bundle->extruder_nozzle_stat.is_force_kept()) {
+        m_preset_bundle->extruder_nozzle_stat.on_printer_model_change(m_preset_bundle);
     }
 }
 
