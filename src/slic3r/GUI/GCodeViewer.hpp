@@ -221,6 +221,7 @@ private:
     std::vector<libvgcode::EViewType> view_type_items;
     std::vector<std::string> view_type_items_str;
     int       m_view_type_sel = 0;
+    bool      m_view_type_auto_set{false};
     std::vector<EMoveType> options_items;
 
     bool m_legend_visible{ true };
