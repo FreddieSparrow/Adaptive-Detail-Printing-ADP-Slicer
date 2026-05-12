@@ -1016,6 +1016,7 @@ static std::vector<std::string> s_Preset_print_options{
     "bottom_surface_pattern",
     "infill_direction",
     "solid_infill_direction",
+    "top_layer_direction",
     "counterbore_hole_bridging",
     "infill_shift_step",
     "sparse_infill_rotate_template",
