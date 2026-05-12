@@ -1,4 +1,5 @@
 #include "MoonrakerPrinterAgent.hpp"
+#include "FilamentMatcher.hpp"
 #include "Http.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -605,58 +606,6 @@ std::string MoonrakerPrinterAgent::trim_and_upper(const std::string& input)
     return result;
 }
 
-std::string MoonrakerPrinterAgent::map_filament_type_to_generic_id(const std::string& filament_type)
-{
-    const std::string upper = trim_and_upper(filament_type);
-
-    // Map to OrcaFilamentLibrary preset IDs (compatible with all printers)
-    // Source: resources/profiles/OrcaFilamentLibrary/filament/
-
-    // PLA variants
-    if (upper == "PLA")           return "OGFL99";
-    if (upper == "PLA-CF")        return "OGFL98";
-    if (upper == "PLA SILK" || upper == "PLA-SILK") return "OGFL96";
-    if (upper == "PLA HIGH SPEED" || upper == "PLA-HS" || upper == "PLA HS") return "OGFL95";
-
-    // ABS/ASA variants
-    if (upper == "ABS")           return "OGFB99";
-    if (upper == "ASA")           return "OGFB98";
-
-    // PETG/PET variants
-    if (upper == "PETG" || upper == "PET") return "OGFG99";
-    if (upper == "PCTG")          return "OGFG97";
-
-    // PA/Nylon variants
-    if (upper == "PA" || upper == "NYLON") return "OGFN99";
-    if (upper == "PA-CF")         return "OGFN98";
-    if (upper == "PPA" || upper == "PPA-CF") return "OGFN97";
-    if (upper == "PPA-GF")        return "OGFN96";
-
-    // PC variants
-    if (upper == "PC")            return "OGFC99";
-
-    // PP/PE variants
-    if (upper == "PE")            return "OGFP99";
-    if (upper == "PP")            return "OGFP97";
-
-    // Support materials
-    if (upper == "PVA")           return "OGFS99";
-    if (upper == "HIPS")          return "OGFS98";
-    if (upper == "BVOH")          return "OGFS97";
-
-    // TPU variants
-    if (upper == "TPU")           return "OGFU99";
-
-    // Other materials
-    if (upper == "EVA")           return "OGFR99";
-    if (upper == "PHA")           return "OGFR98";
-    if (upper == "COPE")          return "OGFLC99";
-    if (upper == "SBS")           return "OFLSBS99";
-
-    // Unknown material
-    return UNKNOWN_FILAMENT_ID;
-}
-
 // JSON helper methods - null-safe accessors
 std::string MoonrakerPrinterAgent::safe_json_string(const nlohmann::json& obj, const char* key)
 {
@@ -804,10 +753,13 @@ bool MoonrakerPrinterAgent::fetch_moonraker_filament_data(std::vector<AmsTrayDat
         tray.bed_temp = safe_json_int(lane_obj, "bed_temp");
         tray.nozzle_temp = safe_json_int(lane_obj, "nozzle_temp");
         tray.has_filament = !tray.tray_type.empty();
-        auto* bundle = GUI::wxGetApp().preset_bundle;
-        tray.tray_info_idx = bundle
-            ? bundle->filaments.filament_id_by_type(tray.tray_type)
-            : map_filament_type_to_generic_id(tray.tray_type);
+        // AFC only reports material type (e.g. "PLA", "ABS"), so tiers 1-3
+        // are skipped and matching falls through to type-based tiers 4/5.
+        // If AFC later reports vendor/color, populate those fields here to
+        // get richer matching for free.
+        FilamentMatchInput match_input;
+        match_input.tray_type = tray.tray_type;
+        tray.tray_info_idx = FilamentMatcher::resolve(match_input);
 
         max_lane_index = std::max(max_lane_index, lane_index);
         trays.push_back(tray);
@@ -932,10 +884,12 @@ bool MoonrakerPrinterAgent::fetch_hh_filament_info(std::vector<AmsTrayData>& tra
         tray.bed_temp = 0;  // HH doesn't provide bed temp in gate arrays
         tray.has_filament = true;
 
-        auto* bundle = GUI::wxGetApp().preset_bundle;
-        tray.tray_info_idx = bundle
-            ? bundle->filaments.filament_id_by_type(tray.tray_type)
-            : map_filament_type_to_generic_id(tray.tray_type);
+        // Happy Hare only reports material type (e.g. "PLA"), so tiers 1-3
+        // are skipped.  Same as AFC above -- populate more fields here if
+        // HH gains vendor/color reporting.
+        FilamentMatchInput match_input;
+        match_input.tray_type = tray.tray_type;
+        tray.tray_info_idx = FilamentMatcher::resolve(match_input);
 
         max_lane_index = std::max(max_lane_index, gate_idx);
         trays.push_back(tray);
