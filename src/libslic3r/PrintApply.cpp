@@ -1,4 +1,5 @@
 #include "ClipperUtils.hpp"
+#include "IMEXHelpers.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
 
@@ -1175,6 +1176,19 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     //     }
     // }
 
+    // Derive physical_extruder_map (0-indexed) from printer_extruder_id (1-indexed) when the
+    // map hasn't been explicitly configured in the printer profile (size <= 1 = default).
+    // This gives all firmware code a consistent slot → physical-extruder translation,
+    // including AFC/MMU setups where multiple tool slots share one physical extruder.
+    {
+        auto* pem = new_full_config.option<ConfigOptionInts>("physical_extruder_map", true);
+        const auto* pei = new_full_config.option<ConfigOptionInts>("printer_extruder_id");
+        if (pem)
+            pem->values = effective_physical_extruder_map(pem, pei).values;
+    }
+
+    m_ori_full_print_config = new_full_config;
+    new_full_config.update_values_to_printer_extruders_for_multiple_filaments(new_full_config, filament_options_with_variant,  "filament_self_index", "filament_extruder_variant");
     auto opt_filament_map = new_full_config.option<ConfigOptionInts>("filament_map");
     std::vector<int> filament_maps = opt_filament_map ? opt_filament_map->values : std::vector<int>();
 

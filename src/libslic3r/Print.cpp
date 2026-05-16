@@ -1,5 +1,6 @@
 #include "Config.hpp"
 #include "Exception.hpp"
+#include "IMEXHelpers.hpp"
 #include "Print.hpp"
 #include "BoundingBox.hpp"
 #include "Brim.hpp"
@@ -1268,6 +1269,38 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    // IDEX/IQEX: block multi-color in non-primary parallel modes when the active
+    // configuration can't physically support it (no within-gantry toolchange path
+    // or MMU lane sharing). See imex_multicolor_block_reason() for the full rule.
+    if (m_config.is_imex.value && extruders.size() > 1 && !m_objects.empty()) {
+        const std::string& parallel_mode = m_objects.front()->config().imex_parallel_mode.value;
+        if (!parallel_mode.empty() && parallel_mode != kImexPrimaryMode) {
+            // Look up the active mode's tools string in the printer config's parallel
+            // table. Fall back to empty (block helper handles it gracefully).
+            std::string active_tools_str;
+            const auto& mode_names = m_config.imex_mode_names.values;
+            const auto& mode_tools = m_config.imex_mode_active_tools.values;
+            for (size_t i = 0; i < mode_names.size(); ++i) {
+                if (mode_names[i] == parallel_mode && i < mode_tools.size()) {
+                    active_tools_str = mode_tools[i];
+                    break;
+                }
+            }
+            std::vector<int> used_filaments_0b;
+            used_filaments_0b.reserve(extruders.size());
+            for (unsigned int e : extruders)
+                used_filaments_0b.push_back((int)e);
+            const std::string reason = imex_multicolor_block_reason(
+                parallel_mode,
+                active_tools_str,
+                m_config.imex_tools_per_gantry.value,
+                used_filaments_0b,
+                m_config.physical_extruder_map);
+            if (!reason.empty())
+                return { reason };
+        }
+    }
 
     if (nozzles < 2 && extruders.size() > 1) {
         auto ret = check_multi_filament_valid(*this);
@@ -2579,7 +2612,12 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     GCode gcode;
     //BBS: compute plate offset for gcode-generator
     const Vec3d origin = this->get_plate_origin();
-    gcode.set_gcode_offset(origin(0), origin(1));
+    // IMEX firmware-managed zones: writer offset gets the IMEX shift so emitted gcode is
+    // centered at bed origin; processor offset stays at plate_origin so the gcode-preview
+    // visualizer renders the centered slice at the bed center rather than the prepare-view
+    // zone placement. Both arms reduce to set_gcode_offset() semantics when shift is zero.
+    const Vec2d imex_off = this->get_imex_slice_offset();
+    gcode.set_gcode_offset_with_imex_shift(origin(0), origin(1), imex_off.x(), imex_off.y());
     gcode.do_export(this, path.c_str(), result, thumbnail_cb);
     gcode.export_layer_filaments(result);
     //BBS
@@ -2848,13 +2886,19 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
 }
 
 //SoftFever
+// "Print space" is the frame the emitted gcode uses. IMEX firmware-managed mode
+// shifts that frame by `m_imex_slice_offset` (the primary zone center in plate-local
+// coords) so the centered slice can be fanned out by firmware. Offset is zero in
+// every other case → identical behavior for non-firmware-managed printers.
 Vec2d Print::translate_to_print_space(const Vec2d &point) const {
     //const BoundingBoxf bed_bbox(config().printable_area.values);
-    return Vec2d(point(0) - m_origin(0), point(1) - m_origin(1));
+    return Vec2d(point(0) - m_origin(0) - m_imex_slice_offset.x(),
+                 point(1) - m_origin(1) - m_imex_slice_offset.y());
 }
 
 Vec2d Print::translate_to_print_space(const Point &point) const {
-    return Vec2d(unscaled(point.x()) - m_origin(0), unscaled(point.y()) - m_origin(1));
+    return Vec2d(unscaled(point.x()) - m_origin(0) - m_imex_slice_offset.x(),
+                 unscaled(point.y()) - m_origin(1) - m_imex_slice_offset.y());
 }
 
 FilamentTempType Print::get_filament_temp_type(const std::string& filament_type)

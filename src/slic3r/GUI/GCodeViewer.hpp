@@ -102,6 +102,7 @@ public:
 
             bool is_visible() const { return m_visible; }
             void set_visible(bool visible) { m_visible = visible; }
+            void set_color(const ColorRGBA& color) { m_model.set_color(color); }
 
             void render(int canvas_width, int canvas_height, const libvgcode::EViewType& view_type);
             void render_position_window(const libvgcode::Viewer* viewer, int canvas_width, int canvas_height, const libvgcode::EViewType& view_type);
@@ -150,6 +151,7 @@ public:
         };
 
         Marker marker;
+        std::vector<Marker> m_imex_secondary_markers; // one per active secondary carriage in IDEX/IQEX mode
         GCodeWindow gcode_window;
         float m_scale = 1.0;
         bool m_show_marker = false;
@@ -203,6 +205,9 @@ private:
 
     ConfigOptionMode m_user_mode;
     bool m_fold = {false};
+    std::string m_marker_filename;      // cached for lazy secondary marker init
+    std::string m_imex_last_mode;       // detect mode changes for secondary marker rebuild
+    GLModel     m_imex_toolhead_box;    // shared box mesh for all carriage footprint overlays
 
     size_t m_extruders_count;
     std::vector<float> m_filament_diameters;

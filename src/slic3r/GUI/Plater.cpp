@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <numeric>
 #include <limits>
+#include <sstream>
 #include <vector>
 #include <string>
 #include <regex>
@@ -65,6 +66,7 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/IMEXHelpers.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ObjColorUtils.hpp"
 // For stl export
@@ -91,6 +93,7 @@
 #include "GUI_Preview.hpp"
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
+#include "IMEXFilamentPickerPopover.hpp"
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
@@ -4910,7 +4913,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "wipe_tower_rotation_angle", "wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_extra_flow", "wipe_tower_max_purge_speed",
         "wipe_tower_wall_type", "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall",
         "wipe_tower_filament",
-        "best_object_pos",  "master_extruder_id"
+        "best_object_pos",  "master_extruder_id",
+        "is_imex"
         }))
     , sidebar(new Sidebar(q))
     , notification_manager(std::make_unique<NotificationManager>(q))
@@ -7953,6 +7957,13 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     else
         invalidated = background_process.apply(this->model, preset_bundle->full_config(false));
 
+    // IMEX firmware-managed zones: refresh the per-slice XY shift on the print backend.
+    // Plater::reslice() calls update_background_process with switch_print=false, which skips
+    // update_slice_context_to_current_plate — so the offset would otherwise stay stale across
+    // mode changes. Pushing it here guarantees every slice picks up the current mode + zone.
+    if (auto* cur_plate = this->partplate_list.get_curr_plate())
+        cur_plate->refresh_imex_slice_offset();
+
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
         // BBS: add only gcode mode
         q->set_only_gcode(false);
@@ -8004,6 +8015,15 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         // update string by type
         q->post_process_string_object_exception(err);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": validate err=%1%, warning=%2%")%err.string%warning.string;
+
+        // IDEX/IQEX placement check: if objects overlap secondary zones, treat it as a
+        // validation error so the standard pathway handles button state, notifications,
+        // and auto-slice blocking consistently.
+        if (err.string.empty()) {
+            PartPlate* imex_plate = partplate_list.get_curr_plate();
+            if (imex_plate && imex_plate->has_imex_placement_violations())
+                err.string = _u8L("Cannot slice: objects are in secondary zones reserved for IDEX/IQEX parallel printing.");
+        }
 
         if (err.string.empty()) {
             this->partplate_list.get_curr_plate()->update_apply_result_invalid(false);
@@ -10088,10 +10108,175 @@ void Plater::priv::on_action_open_project(SimpleEvent&)
 }
 
 //BBS: GUI refactor: slice plate
+// Orca IMEX: Collects all IMEX-related warnings for a plate before slicing.
+// Returns one formatted bullet string per issue. Empty means no concerns.
+// Checks:
+//   1. Multi-material objects alongside a parallel mode (existing badge condition)
+//   2. Bed temperature conflict: primary tool controls the bed; secondary tools warned
+//      if their optimal bed temp differs from the primary's by more than 5°C
+//   3. Filament type mismatch: materials with incompatible requirements
+static std::vector<wxString> collect_imex_warnings(PartPlate* plate)
+{
+    std::vector<wxString> warnings;
+    if (!plate) return warnings;
+
+    // Multi-material conflicts are now hard-blocked at slice time via
+    // imex_multicolor_block_reason (Print::validate). The pre-slice nanny used to
+    // emit a vague soft warning here, but the hard block surfaces a more
+    // descriptive message at exactly the right moment, so the duplicate warning
+    // was dropped. Bed-temp + filament-type checks below remain useful soft
+    // warnings — they catch user configurations that *will* slice but produce
+    // problematic gcode.
+    const std::string mode = plate->get_imex_mode();
+    if (mode == kImexPrimaryMode) return warnings;
+
+    PresetBundle* bundle = wxGetApp().preset_bundle;
+    if (!bundle) return warnings;
+
+    // Resolve active tool indices for this mode from printer config
+    const auto& printer_cfg = bundle->printers.get_edited_preset().config;
+    const auto* mode_names_opt = printer_cfg.option<ConfigOptionStrings>("imex_mode_names");
+    const auto* tools_opt      = printer_cfg.option<ConfigOptionStrings>("imex_mode_active_tools");
+
+    // Upper bound: filament_presets.size() is the practical limit, capped at MAXIMUM_EXTRUDER_NUMBER (64)
+    const size_t max_tool = std::min(bundle->filament_presets.size(), MAXIMUM_EXTRUDER_NUMBER);
+
+    std::vector<int> active_tools;
+    int primary_tool = -1;
+    if (mode_names_opt && tools_opt) {
+        for (size_t i = 0; i < mode_names_opt->values.size(); ++i) {
+            if (i >= tools_opt->values.size() || mode_names_opt->values[i] != mode) continue;
+            const std::string& entry = tools_opt->values[i];
+            primary_tool = imex_primary_tool_for_mode(entry);
+            for (const auto& [phys_idx, role] : parse_imex_active_tools(entry)) {
+                (void)role;
+                if (phys_idx >= 0 && (max_tool == 0 || (size_t)phys_idx < max_tool))
+                    active_tools.push_back(phys_idx);
+            }
+            break;
+        }
+    }
+
+    if (active_tools.size() < 2 || primary_tool < 0) return warnings;
+    const DynamicPrintConfig& full_cfg = bundle->full_config();
+    // Bed temps are per-plate-type; resolve the active plate's bed type to get the right key.
+    const BedType bed_type = bundle->project_config.opt_enum<BedType>("curr_bed_type");
+    const std::string bed_temp_key = get_bed_temp_key(bed_type);
+    const auto* bed_temps = bed_temp_key.empty() ? nullptr : full_cfg.option<ConfigOptionInts>(bed_temp_key);
+    const auto& filament_presets = bundle->filament_presets;
+
+    // active_tools and primary_tool are PHYSICAL extruder indices (parsed from
+    // imex_mode_active_tools). filament_presets and bed_temps are indexed by LOGICAL
+    // filament slot. For MMU/AFC layouts where multiple logical slots feed one
+    // physical extruder, looking up filament_presets[physical_idx] returns the wrong
+    // filament. Translate physical -> logical before indexing.
+    //
+    // Primary vs secondary use DIFFERENT translation rules:
+    //   - Primary's filament: the slot the user assigned to the printing object(s).
+    //     Walk plate->get_extruders() and pick a slot whose pem entry maps to the
+    //     primary's physical index. If multiple slots qualify, the first match wins.
+    //   - Secondary's filament: per-plate imex_head_filament_map override (set via
+    //     the IMEX ghost picker). No object owns a secondary in copy/mirror mode —
+    //     the firmware duplicates the primary, so the override is the only source.
+    //   - Both fall back to first_filament_for_physical_head as a last resort so a
+    //     warning still has *some* filament to name.
+    const ConfigOptionInts pem = effective_physical_extruder_map(*bundle);
+    std::map<int, int> plate_head_map;
+    if (auto* hfm = plate->config()->option<ConfigOptionString>("imex_head_filament_map"))
+        plate_head_map = parse_imex_head_filament_map(hfm->value);
+
+    auto logical_for_primary = [&](int physical_idx) -> int {
+        // get_extruders() returns 1-based filament slots used by objects on this plate.
+        const int from_objects = imex_primary_logical_from_objects(
+            plate->get_extruders(true), pem, physical_idx);
+        if (from_objects >= 0) return from_objects;
+        // No object on the plate routes to this physical: defensive fallback so the
+        // warning still has *something* to name. In practice this shouldn't fire when
+        // the active mode says this physical is primary — there has to be something
+        // assigned to it for the slicer to print.
+        return first_filament_for_physical_head(pem, physical_idx);
+    };
+    auto logical_for_secondary = [&](int physical_idx) -> int {
+        const int logical = resolve_filament_for_head(plate_head_map, pem, physical_idx);
+        return logical >= 0 ? logical : physical_idx;
+    };
+
+    // Primary tool's bed temp and filament type (looked up by logical slot)
+    const int primary_logical = logical_for_primary(primary_tool);
+    const int primary_bed_temp = (bed_temps && primary_logical < (int)bed_temps->values.size())
+                                    ? bed_temps->values[primary_logical] : 0;
+    std::string primary_display_type;
+    if (primary_logical < (int)filament_presets.size()) {
+        Preset* p = bundle->filaments.find_preset(filament_presets[primary_logical]);
+        if (p) p->get_filament_type(primary_display_type);
+    }
+    if (primary_display_type.empty()) primary_display_type = "unknown";
+
+    for (size_t i = 0; i < active_tools.size(); ++i) {
+        const int tool_idx = active_tools[i];
+        if (tool_idx == primary_tool) continue;
+
+        const int secondary_logical = logical_for_secondary(tool_idx);
+
+        std::string secondary_display_type;
+        if (secondary_logical < (int)filament_presets.size()) {
+            Preset* p = bundle->filaments.find_preset(filament_presets[secondary_logical]);
+            if (p) p->get_filament_type(secondary_display_type);
+        }
+        if (secondary_display_type.empty()) secondary_display_type = "unknown";
+
+        // Check 2: bed temperature — primary wins, secondary may not get what it needs
+        if (bed_temps && primary_bed_temp > 0 && secondary_logical < (int)bed_temps->values.size()) {
+            const int secondary_bed_temp = bed_temps->values[secondary_logical];
+            if (secondary_bed_temp > 0 && std::abs(secondary_bed_temp - primary_bed_temp) > 5) {
+                warnings.push_back(wxString::Format(
+                    _L("Bed temperature conflict: T%d (%s) sets the bed to %d\u00B0C \u2014 "
+                       "T%d (%s) requires %d\u00B0C. The primary tool controls the bed; "
+                       "secondary tools print at whatever temperature it sets."),
+                    primary_tool, primary_display_type, primary_bed_temp,
+                    tool_idx, secondary_display_type, secondary_bed_temp));
+            }
+        }
+
+        // Check 3: filament type mismatch
+        if (primary_display_type != secondary_display_type &&
+            primary_display_type != "unknown" && secondary_display_type != "unknown") {
+            warnings.push_back(wxString::Format(
+                _L("Filament type mismatch: T%d uses %s and T%d uses %s. "
+                   "These materials have incompatible requirements and are not designed to print together."),
+                primary_tool, primary_display_type,
+                tool_idx, secondary_display_type));
+        }
+    }
+
+    return warnings;
+}
+
 void Plater::priv::on_action_slice_plate(SimpleEvent&)
 {
     if (q != nullptr) {
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice plate event\n" ;
+        // IMEX parallel mode warnings (current plate only)
+        if (wxGetApp().app_config->get("imex_pre_slice_warnings") != "false") {
+            PartPlate* plate = partplate_list.get_curr_plate();
+            std::vector<wxString> warnings = collect_imex_warnings(plate);
+            if (!warnings.empty()) {
+                int plate_num = partplate_list.get_curr_plate_index() + 1;
+                wxString msg = wxString::Format(_L("Plate %d has IDEX/IQEX parallel mode active with the following concerns:\n\n"), plate_num);
+                for (const wxString& w : warnings)
+                    msg += L"\u2022 " + w + "\n\n";
+                msg += _L("Continue slicing?");
+                RichMessageDialog dlg(q, msg, _L("IDEX/IQEX Parallel Mode Warning"), wxICON_WARNING | wxYES | wxNO);
+                dlg.ShowCheckBox(_L("Don't show these warnings again"));
+                int result = dlg.ShowModal();
+                if (dlg.IsCheckBoxChecked())
+                    wxGetApp().app_config->set("imex_pre_slice_warnings", "false");
+                if (result != wxID_YES) {
+                    q->select_view_3D("3D");
+                    return;
+                }
+            }
+        }
+
         //BBS update extruder params and speed table before slicing
         const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
         auto& print = q->get_partplate_list().get_current_fff_print();
@@ -10103,6 +10288,8 @@ void Plater::priv::on_action_slice_plate(SimpleEvent&)
         m_slice_all = false;
         q->reslice();
         q->select_view_3D("Preview");
+        // Regenerate any thumbnails that were wiped by the panel switch above.
+        q->update_all_plate_thumbnails();
     }
 }
 
@@ -10110,7 +10297,35 @@ void Plater::priv::on_action_slice_plate(SimpleEvent&)
 void Plater::priv::on_action_slice_all(SimpleEvent&)
 {
     if (q != nullptr) {
-        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ":received slice project event\n" ;
+        // IMEX parallel mode warnings (all plates)
+        if (wxGetApp().app_config->get("imex_pre_slice_warnings") != "false") {
+            wxString combined_msg;
+            int plate_count = partplate_list.get_plate_count();
+            for (int i = 0; i < plate_count; ++i) {
+                PartPlate* plate = partplate_list.get_plate(i);
+                std::vector<wxString> warnings = collect_imex_warnings(plate);
+                if (warnings.empty()) continue;
+                combined_msg += wxString::Format(_L("Plate %d:\n"), i + 1);
+                for (const wxString& w : warnings)
+                    combined_msg += L"  \u2022 " + w + "\n";
+                combined_msg += "\n";
+            }
+            if (!combined_msg.empty()) {
+                wxString msg = _L("The following IDEX/IQEX parallel mode concerns were detected:\n\n")
+                               + combined_msg
+                               + _L("Continue slicing?");
+                RichMessageDialog dlg(q, msg, _L("IDEX/IQEX Parallel Mode Warning"), wxICON_WARNING | wxYES | wxNO);
+                dlg.ShowCheckBox(_L("Don't show these warnings again"));
+                int result = dlg.ShowModal();
+                if (dlg.IsCheckBoxChecked())
+                    wxGetApp().app_config->set("imex_pre_slice_warnings", "false");
+                if (result != wxID_YES) {
+                    q->select_view_3D("3D");
+                    return;
+                }
+            }
+        }
+
         //BBS update extruder params and speed table before slicing
         const Slic3r::DynamicPrintConfig& config = wxGetApp().preset_bundle->full_config();
         auto& print = q->get_partplate_list().get_current_fff_print();
@@ -10127,6 +10342,8 @@ void Plater::priv::on_action_slice_all(SimpleEvent&)
         q->reslice();
         if (!m_is_publishing)
             q->select_view_3D("Preview");
+        // Regenerate any thumbnails that were wiped by the panel switch above.
+        q->update_all_plate_thumbnails();
         //BBS: wish to select all plates stats item
         preview->get_canvas3d()->_update_select_plate_toolbar_stats_item(true);
     }
@@ -13707,7 +13924,6 @@ void Plater::invalid_all_plate_thumbnails()
 {
     if (using_exported_file() || skip_thumbnail_invalid)
         return;
-    BOOST_LOG_TRIVIAL(info) << "thumb: invalid all";
     for (int i = 0; i < get_partplate_list().get_plate_count(); i++) {
         PartPlate* plate = get_partplate_list().get_plate(i);
         plate->thumbnail_data.reset();
@@ -15527,10 +15743,10 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
             ThumbnailData* thumbnail_data = &p->partplate_list.get_plate(i)->thumbnail_data;
             if (p->partplate_list.get_plate(i)->thumbnail_data.is_valid() &&  using_exported_file()) {
                 //no need to generate thumbnail
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": non need to re-generate thumbnail for gcode/exported mode of plate %1%")%i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": non need to re-generate thumbnail for gcode/exported mode of plate %1%")%i;
             }
             else {
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": re-generate thumbnail for plate %1%") % i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": re-generate thumbnail for plate %1%") % i;
                 const ThumbnailsParams thumbnail_params = { {}, false, true, true, true, i };
                 p->generate_thumbnail(p->partplate_list.get_plate(i)->thumbnail_data, THUMBNAIL_SIZE_3MF.first, THUMBNAIL_SIZE_3MF.second,
                                     thumbnail_params, Camera::EType::Ortho);
@@ -15540,9 +15756,9 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
             ThumbnailData *no_light_thumbnail_data = &p->partplate_list.get_plate(i)->no_light_thumbnail_data;
             if (p->partplate_list.get_plate(i)->no_light_thumbnail_data.is_valid() && using_exported_file()) {
                 // no need to generate thumbnail
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": non need to re-generate thumbnail for gcode/exported mode of plate %1%") % i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": non need to re-generate thumbnail for gcode/exported mode of plate %1%") % i;
             } else {
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": re-generate thumbnail for plate %1%") % i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": re-generate thumbnail for plate %1%") % i;
                 const ThumbnailsParams thumbnail_params = {{}, false, true, true, true, i};
                 p->generate_thumbnail(p->partplate_list.get_plate(i)->no_light_thumbnail_data, THUMBNAIL_SIZE_3MF.first, THUMBNAIL_SIZE_3MF.second, thumbnail_params,
                                       Camera::EType::Ortho,  Camera::ViewAngleType::Iso, false, true);
@@ -15557,10 +15773,10 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
             ThumbnailData* top_thumbnail = &p->partplate_list.get_plate(i)->top_thumbnail_data;
             if (top_thumbnail->is_valid() &&  using_exported_file()) {
                 //no need to generate thumbnail
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": non need to re-generate top_thumbnail for gcode/exported mode of plate %1%")%i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": non need to re-generate top_thumbnail for gcode/exported mode of plate %1%")%i;
             }
             else {
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": re-generate top_thumbnail for plate %1%") % i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": re-generate top_thumbnail for plate %1%") % i;
                 const ThumbnailsParams thumbnail_params = { {}, false, true, false, true, i };
                 p->generate_thumbnail(p->partplate_list.get_plate(i)->top_thumbnail_data, THUMBNAIL_SIZE_3MF.first, THUMBNAIL_SIZE_3MF.second, thumbnail_params,
                                       Camera::EType::Ortho, Camera::ViewAngleType::Top_Plate, false);
@@ -15570,10 +15786,10 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
             ThumbnailData* picking_thumbnail = &p->partplate_list.get_plate(i)->pick_thumbnail_data;
             if (picking_thumbnail->is_valid() &&  using_exported_file()) {
                 //no need to generate thumbnail
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": non need to re-generate pick_thumbnail for gcode/exported mode of plate %1%")%i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": non need to re-generate pick_thumbnail for gcode/exported mode of plate %1%")%i;
             }
             else {
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": re-generate pick_thumbnail for plate %1%") % i;
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(": re-generate pick_thumbnail for plate %1%") % i;
                 const ThumbnailsParams thumbnail_params = { {}, false, true, false, true, i };
                 p->generate_thumbnail(p->partplate_list.get_plate(i)->pick_thumbnail_data, THUMBNAIL_SIZE_3MF.first, THUMBNAIL_SIZE_3MF.second, thumbnail_params,
                                       Camera::EType::Ortho, Camera::ViewAngleType::Top_Plate, true,true);
@@ -16496,6 +16712,7 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
 {
     bool update_scheduled = false;
     bool bed_shape_changed = false;
+    bool imex_changed = false;
     //bool print_sequence_changed = false;
     t_config_option_keys diff_keys = p->config->diff(config);
 
@@ -16584,10 +16801,27 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
                  opt_key == "sparse_infill_filament" || opt_key == "solid_infill_filament") {
             update_scheduled = true;
         }
+        // IDEX/IQEX: when is_imex toggles the mode icon needs to be repositioned on every plate.
+        // set_shape() short-circuits when the bed geometry is unchanged, so we refresh explicitly.
+        // Defer until after the loop so bed_shape_changed / set_bed_shape() run first if needed.
+        else if (opt_key == "is_imex") {
+            imex_changed = true;
+            update_scheduled = true;
+        }
     }
 
     if (bed_shape_changed)
         set_bed_shape();
+
+    // After any bed-shape or is_imex change, ensure the IMEX mode icon geometry and
+    // raycaster are correct.  set_shape() short-circuits when the bed is unchanged,
+    // so we call refresh_imex_icons() explicitly whenever is_imex is active.
+    // Always done AFTER set_bed_shape() so m_shape is current.
+    if (bed_shape_changed || imex_changed) {
+        auto* is_imex_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionBool>("is_imex");
+        if (is_imex_opt && is_imex_opt->value)
+            p->partplate_list.refresh_imex_icons();
+    }
 
     config_change_notification(config, std::string("print_sequence"));
 
@@ -17956,7 +18190,67 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
         update();
         p->partplate_list.select_plate(0);
     }
+    else if (action == (int)PartPlate::PLATE_IMEX_MODE_ID)
+    {
+        ret = select_plate(plate_index);
+        if (!ret) {
+            PartPlate* curr_plate = p->partplate_list.get_curr_plate();
+            // Build ordered mode list: kImexPrimaryMode first, then all named modes.
+            std::vector<std::string> modes;
+            modes.push_back(kImexPrimaryMode);
+            const DynamicPrintConfig& printer_cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+            auto* names_opt = printer_cfg.option<ConfigOptionStrings>("imex_mode_names");
+            if (names_opt) {
+                for (const auto& n : names_opt->values)
+                    if (!n.empty() && n != kImexPrimaryMode) modes.push_back(n);
+            }
 
+            if (right_click) {
+                // Show a popup menu with all modes.
+                wxMenu menu;
+                std::string current = curr_plate->get_imex_mode();
+                std::vector<int> mode_ids;
+                mode_ids.reserve(modes.size());
+                for (size_t i = 0; i < modes.size(); ++i) {
+                    int id = wxNewId();
+                    mode_ids.push_back(id);
+                    const wxString label = (modes[i] == kImexPrimaryMode) ? _L("Primary") : from_u8(modes[i]);
+                    wxMenuItem* item = menu.AppendRadioItem(id, label);
+                    if (modes[i] == current)
+                        item->Check(true);
+                }
+                menu.Bind(wxEVT_MENU, [this, curr_plate, modes, mode_ids](wxCommandEvent& e) {
+                    auto it = std::find(mode_ids.begin(), mode_ids.end(), e.GetId());
+                    if (it == mode_ids.end()) return;
+                    const size_t idx = std::distance(mode_ids.begin(), it);
+                    take_snapshot("set imex mode");
+                    curr_plate->set_imex_mode(modes[idx]);
+                    update_project_dirty_from_presets();
+                    set_plater_dirty(true);
+                    update();
+                });
+                p->view3D->get_canvas3d()->get_wxglcanvas()->PopupMenu(&menu);
+                ret = 1; // signal to caller: popup was shown, suppress plate context menu
+            } else {
+                // Left-click: always cycles mode. The IMEX ghost renderer exposes
+                // the per-head filament picker on the plate itself; no popover here.
+                const std::string current_mode = curr_plate->get_imex_mode();
+                auto it = std::find(modes.begin(), modes.end(), current_mode);
+                size_t next_idx = (it == modes.end()) ? 0 : ((it - modes.begin() + 1) % modes.size());
+                std::string next_mode = modes[next_idx];
+                if (next_mode != current_mode) {
+                    take_snapshot("set imex mode");
+                    curr_plate->set_imex_mode(next_mode);
+                    update_project_dirty_from_presets();
+                    set_plater_dirty(true);
+                    update();
+                }
+            }
+        } else {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "can not select plate %1%" << plate_index;
+            ret = -1;
+        }
+    }
     else
     {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "invalid action %1%, with right_click=%2%" << action << right_click;
@@ -18465,6 +18759,58 @@ bool Plater::PopupObjectTableBySelection()
 void Plater::update_title_dirty_status()
 {
     p->update_title_dirty_status();
+}
+
+Plater::ImexGhostTooltip Plater::format_imex_ghost_tooltip(int physical_head) const
+{
+    ImexGhostTooltip t{physical_head, -1, GLVolume::UNPRINTABLE_COLOR, {}};
+
+    const PartPlate* plate = p->partplate_list.get_curr_plate();
+    if (!plate) {
+        t.label = "T" + std::to_string(physical_head) + " -> (no plate)";
+        return t;
+    }
+
+    const ConfigOptionInts pem = effective_physical_extruder_map(*wxGetApp().preset_bundle);
+    const auto map = plate->get_imex_head_filament_map();
+    const int logical = resolve_filament_for_head(map, pem, physical_head);
+    if (logical < 0) {
+        // No filament slot resolves to this physical head. Usually means the printer's
+        // extruder count is understated relative to the filament palette (user added a
+        // filament without extending printer_extruder_id in the Machine tab).
+        t.label = "T" + std::to_string(physical_head) + " — no filament routed\n"
+                  "Add an extruder in the Machine tab so this head has a filament slot.";
+        return t;
+    }
+    t.filament_slot_1based = logical + 1;
+    t.swatch = plate->get_imex_head_filament_color(physical_head);
+    t.swatch.a(1.0f);  // tooltip swatch opaque
+    t.label  = "T" + std::to_string(physical_head) +
+               " -> filament " + std::to_string(t.filament_slot_1based);
+    return t;
+}
+
+void Plater::on_imex_ghost_click(int physical_head)
+{
+    const ConfigOptionInts pem = effective_physical_extruder_map(*wxGetApp().preset_bundle);
+
+    int lane_count = 0;
+    for (int pv : pem.values) if (pv == physical_head) ++lane_count;
+    if (lane_count < 2) return;  // single-lane head -> click is a no-op, tooltip conveyed status
+
+    PartPlate* plate = p->partplate_list.get_curr_plate();
+    if (!plate) return;
+
+    auto* picker = new IMEXFilamentPickerPopover(
+        p->view3D->get_canvas3d()->get_wxglcanvas(),
+        plate, pem, physical_head,
+        [this]() {
+            take_snapshot("edit imex head filament");
+            update_project_dirty_from_presets();
+            set_plater_dirty(true);
+            update();
+        });
+    picker->popup_at_cursor();
 }
 
 
