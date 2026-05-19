@@ -4,9 +4,12 @@ find_package(OpenGL QUIET REQUIRED)
 
 orcaslicer_add_cmake_project(
   GLEW
-  SOURCE_DIR  ${CMAKE_CURRENT_LIST_DIR}/glew
+  URL https://github.com/nigels-com/glew/releases/download/glew-2.3.1/glew-2.3.1.zip
+  URL_HASH SHA256=09E0083AE46930ABA9B53E72C92EE1A557E24ED393526FEC26CB0EBABD834720
+  SOURCE_SUBDIR build/cmake
   CMAKE_ARGS
-    -DGLEW_USE_EGL=OFF
+    -DBUILD_UTILS=OFF
+    -DGLEW_EGL=OFF
 )
 
 if (MSVC)
