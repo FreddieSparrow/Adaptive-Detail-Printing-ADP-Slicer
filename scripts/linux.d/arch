@@ -14,7 +14,6 @@ export REQUIRED_DEV_PACKAGES=(
     glew
     gst-plugins-good
     gstreamer
-    gstreamermm
     gtk3
     libmspack
     libsecret
