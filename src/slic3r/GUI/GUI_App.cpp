@@ -110,6 +110,7 @@
 #include "ParamsDialog.hpp"
 #include "KBShortcutsDialog.hpp"
 #include "DownloadProgressDialog.hpp"
+#include "TroubleshootDialog.hpp"
 
 #include "BitmapCache.hpp"
 #include "Notebook.hpp"
@@ -4076,6 +4077,12 @@ void GUI_App::keyboard_shortcuts()
     dlg.ShowModal();
 }
 
+void GUI_App::troubleshoot()
+{
+    TroubleshootDialog dlg;
+    if (dlg.ShowModal() == wxID_REMOVE)
+         wxGetApp().mainframe->Close(false);
+}
 
 void GUI_App::ShowUserGuide() {
     // BBS:Show NewUser Guide
