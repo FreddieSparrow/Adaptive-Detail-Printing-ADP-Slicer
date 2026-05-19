@@ -181,6 +181,11 @@ static t_config_enum_values s_keys_map_BedTempFormula {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BedTempFormula)
 
+static t_config_enum_values s_keys_map_CenterOfSurfacePattern{
+    {"each_surface", int(CenterOfSurfacePattern::Each_Surface)},
+    {"each_model", int(CenterOfSurfacePattern::Each_Model)},
+    {"each_assemble", int(CenterOfSurfacePattern::Each_Assembly)}};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CenterOfSurfacePattern)
 // Orca
 static t_config_enum_values s_keys_map_PowerLossRecoveryMode {
     { "printer_configuration", int(PowerLossRecoveryMode::PrinterConfiguration) },
@@ -6571,6 +6576,38 @@ void PrintConfigDef::init_fff_params()
     def->max      = 100;
     def->set_default_value(new ConfigOptionPercent(100));
 
+    def           = this->add("anisotropic_surfaces", coBool);
+    def->label    = L("Anisotropic surfaces");
+    def->category = L("Strength");
+    def->tooltip  = L("Anisotropic patterns on the top and bottom surfaces.\n"
+                       "Co-directional printing mode will be applied. For certain patterns, omni-directional filling provides color "
+                       "dispersion when using multi-colored or silk plastics. "
+                       "This option disable the gap fill. "
+                       "This option can increase a printing time. ");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def           = this->add("separated_infills", coBool);
+    def->label    = L("Separated infills");
+    def->category = L("Strength");
+    def->tooltip  = L("Separated infills for each part of the one model. ");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def                = this->add("center_of_surface_pattern", coEnum);
+    def->label         = L("Center of surface pattern to");
+    def->category      = L("Strength");
+    def->tooltip       = L("Align centering point of pattern to the indeed place. Need for aesthetic purpose.\n"
+                                 "For patchwork, this parameter defines the surface of each tile within the entire masonry.");
+    def->enum_keys_map = &ConfigOptionEnum<CenterOfSurfacePattern>::get_enum_values();
+    def->enum_values.push_back("each_surface");
+    def->enum_values.push_back("each_model");
+    def->enum_values.push_back("each_assembly");
+    def->enum_labels.push_back(L("Each Surface"));
+    def->enum_labels.push_back(L("Each Model"));
+    def->enum_labels.push_back(L("Each Assembly"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<CenterOfSurfacePattern>(CenterOfSurfacePattern::Each_Surface));
 
     def = this->add("travel_speed", coFloat);
     def->label = L("Travel");
