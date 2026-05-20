@@ -45,12 +45,26 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_VERSION VERSION_LESS "3.25")
     set(LINUX ON CACHE BOOL "" FORCE)
 endif ()
 
+if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+    set(IS_CLANG_CL TRUE)
+else ()
+    set(IS_CLANG_CL FALSE)
+endif ()
+
 include(ExternalProject)
 include(ProcessorCount)
 
 ProcessorCount(NPROC)
 if (NPROC EQUAL 0)
     set(NPROC 1)
+endif ()
+
+list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/../cmake/modules/)
+if (USE_CCACHE)
+    if (MSVC)
+        set(CCACHE_PROGRAMS "sccache" CACHE STRING _ FORCE)
+    endif ()
+    find_package(ccache REQUIRED)
 endif ()
 
 set(DEP_DOWNLOAD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/DL_CACHE CACHE PATH "Path for downloaded source packages.")
@@ -154,8 +168,12 @@ if (NOT _is_multi AND NOT CMAKE_BUILD_TYPE)
     message(STATUS "Forcing CMAKE_BUILD_TYPE to Release as it was not specified.")
 endif ()
 
+foreach (var IN LISTS CCACHE_VARS_SET)
+    list(APPEND CCACHE_LINE -D${var}=${${var}})
+endforeach ()
+
 function(orcaslicer_add_cmake_project projectname)
-    cmake_parse_arguments(P_ARGS "" "INSTALL_DIR;BUILD_COMMAND;INSTALL_COMMAND" "CMAKE_ARGS" ${ARGN})
+    cmake_parse_arguments(P_ARGS "" "INSTALL_DIR;BUILD_COMMAND;INSTALL_COMMAND;FORCE_VS" "CMAKE_ARGS" ${ARGN})
 
     set(_configs_line -DCMAKE_BUILD_TYPE:STRING=${CMAKE_BUILD_TYPE})
     if (_is_multi OR MSVC)
@@ -166,18 +184,33 @@ function(orcaslicer_add_cmake_project projectname)
         endif ()
     endif ()
 
+    set(_gen "")
+    set(_build_j "-j${NPROC}")
+    set(_clang_cl_args)
     if (MSVC)
-      set(_gen CMAKE_GENERATOR "${DEP_MSVC_GEN}" CMAKE_GENERATOR_PLATFORM "${DEP_PLATFORM}")
-    else()
-      set(_gen "")
-    endif()
+        if ("${CMAKE_GENERATOR}" MATCHES "Ninja" AND NOT P_ARGS_FORCE_VS)
+            set(_gen CMAKE_GENERATOR ${CMAKE_GENERATOR})
+            if (IS_CLANG_CL)
+                set(_clang_cl_args
+                    -DCMAKE_C_COMPILER=clang-cl.exe
+                    -DCMAKE_CXX_COMPILER=clang-cl.exe
+                    -DCMAKE_LINKER=link.exe
+                )
+            endif ()
+        else ()
+            set(_gen CMAKE_GENERATOR "${DEP_MSVC_GEN}" CMAKE_GENERATOR_PLATFORM "${DEP_PLATFORM}")
+            set(_build_j "/m")
+            if (IS_CLANG_CL AND NOT P_ARGS_FORCE_VS)
+                set(_clang_cl_args -T ClangCL
+                    # TODO: Find a more elegant way to add this flag
+                    "-DCMAKE_C_FLAGS_RELEASE:STRING=${CMAKE_C_FLAGS_RELEASE} /MP"
+                    "-DCMAKE_CXX_FLAGS_RELEASE:STRING=${CMAKE_CXX_FLAGS_RELEASE} /MP")
+            endif ()
+        endif ()
+    endif ()
 
     if ($ENV{CMAKE_BUILD_PARALLEL_LEVEL})
-      set(_build_j "")  # assume environment will control --build parallel setting
-    elseif(MSVC)
-      set(_build_j "/m")
-    else()
-      set(_build_j "-j${NPROC}")
+        set(_build_j "")  # assume environment will control --build parallel setting
     endif ()
 
 if (NOT IS_CROSS_COMPILE OR NOT APPLE)
@@ -201,6 +234,8 @@ if (NOT IS_CROSS_COMPILE OR NOT APPLE)
             -DCMAKE_SHARED_LINKER_FLAGS:STRING=${CMAKE_SHARED_LINKER_FLAGS}
             -DCMAKE_MODULE_LINKER_FLAGS:STRING=${CMAKE_MODULE_LINKER_FLAGS}
             -DBUILD_SHARED_LIBS:BOOL=OFF
+            ${_clang_cl_args}
+            ${CCACHE_LINE}
             ${_cmake_osx_arch}
             "${_configs_line}"
             ${DEP_CMAKE_OPTS}
@@ -243,6 +278,7 @@ else()
             -DCMAKE_IGNORE_PREFIX_PATH:STRING=${CMAKE_IGNORE_PREFIX_PATH}
             -DBUILD_SHARED_LIBS:BOOL=OFF
             ${_cmake_osx_arch}
+            ${CCACHE_LINE}
             "${_configs_line}"
             ${DEP_CMAKE_OPTS}
             ${P_ARGS_CMAKE_ARGS}
@@ -310,6 +346,27 @@ if(FLATPAK)
     find_package(OpenSSL 1.1...<3.2)
     find_package(CURL)
 endif()
+
+# Find relative path from root to source used for adjusting patch command
+file(RELATIVE_PATH BINARY_DIR_REL  ${CMAKE_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR})
+
+execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --is-inside-work-tree
+    RESULT_VARIABLE REV_PARSE_RESULT
+    OUTPUT_VARIABLE REV_PARSE_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Will output "true" and have a 0 return code if within a git repo
+if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
+    set(IN_GIT_REPO TRUE)
+endif ()
+
+function(get_patch_dir_flag dep_name)
+    if (IN_GIT_REPO)
+        set(${dep_name}_dir_flag --directory ${BINARY_DIR_REL}/dep_${dep_name}-prefix/src/dep_${dep_name} PARENT_SCOPE)
+    endif ()
+endfunction()
 
 set(ZLIB_PKG "")
 if (NOT ZLIB_FOUND)
@@ -394,19 +451,6 @@ if(NOT FREETYPE_FOUND)
     set(FREETYPE_PKG "dep_FREETYPE")
 endif()
 
-execute_process(
-    COMMAND ${GIT_EXECUTABLE} rev-parse --is-inside-work-tree
-    RESULT_VARIABLE REV_PARSE_RESULT
-    OUTPUT_VARIABLE REV_PARSE_OUTPUT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-# Will output "true" and have a 0 return code if within a git repo
-if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
-    set(IN_GIT_REPO TRUE)
-    # Find relative path from root to source used for adjusting patch command
-    file(RELATIVE_PATH BINARY_DIR_REL  ${CMAKE_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR})
-endif ()
 
 include(OCCT/OCCT.cmake)
 include(OpenCV/OpenCV.cmake)

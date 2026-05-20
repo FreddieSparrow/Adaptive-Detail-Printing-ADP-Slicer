@@ -46,9 +46,11 @@ You can do this in Environment Variables settings.
         ")
 
         if(NOT IS_CI)
-            message(FATAL_ERROR "${_warning_text}")
+#            message(FATAL_ERROR "${_warning_text}")
         endif()
     endif()
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+    cmake_policy(SET CMP0141 NEW)
 endif ()
 
 if (APPLE)
@@ -209,13 +211,15 @@ if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
 
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall \
         -Wno-old-style-cast -Wno-reserved-id-macro -Wno-c++98-compat-pedantic")
+    add_compile_options(-Wno-c++11-narrowing)
+    add_compile_options(/FS)
 else ()
     set(IS_CLANG_CL FALSE)
 endif ()
 
 if (MSVC)
-    if (SLIC3R_MSVC_COMPILE_PARALLEL AND NOT IS_CLANG_CL)
-           add_compile_options(/MP)
+    if (NOT CMAKE_GENERATOR MATCHES "Ninja" AND SLIC3R_MSVC_COMPILE_PARALLEL)
+#           add_compile_options(/MP)
     endif ()
     # /bigobj (Increase Number of Sections in .Obj file)
     # error C3859: virtual memory range for PCH exceeded; please recompile with a command line option of '-Zm90' or greater
@@ -304,6 +308,14 @@ endif ()
 # Add our own cmake module path.
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/modules/)
 message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
+
+if (USE_CCACHE)
+    if (MSVC)
+        set(CCACHE_PROGRAMS "sccache" CACHE STRING _ FORCE)
+    endif ()
+    find_package(ccache REQUIRED)
+endif ()
+
 message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
 enable_testing ()
@@ -387,7 +399,7 @@ if (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUXX)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fext-numeric-literals" )
 endif()
 
-if (NOT MSVC AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang"))
+if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
     if (NOT MINGW)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall" )
     endif ()
@@ -425,7 +437,7 @@ if (NOT MSVC AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMP
         add_compile_options(-Wno-deprecated-declarations)
     endif()
 
-    if((${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" OR ${CMAKE_CXX_COMPILER_ID} STREQUAL "AppleClang") AND ${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER 15)
+    if(NOT MSVC AND (${CMAKE_CXX_COMPILER_ID} STREQUAL "Clang" OR ${CMAKE_CXX_COMPILER_ID} STREQUAL "AppleClang") AND ${CMAKE_CXX_COMPILER_VERSION} VERSION_GREATER 15)
         include(CheckCXXCompilerFlag)
         check_cxx_compiler_flag(-Wno-error=enum-constexpr-conversion HAS_WNO_ERROR_ENUM_CONSTEXPR_CONV)
         if(HAS_WNO_ERROR_ENUM_CONSTEXPR_CONV)
