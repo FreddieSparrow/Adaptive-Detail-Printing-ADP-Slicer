@@ -80,6 +80,7 @@
 #endif
 #include "GUI_Utils.hpp"
 #include "GUI_Factories.hpp"
+#include "PresetSwitchLogic.hpp"
 #include "wxExtensions.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "MainFrame.hpp"
@@ -9517,14 +9518,14 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
         combo->ShowBadge(select_flag == (int)PresetComboBox::FilamentAMSType::FROM_AMS);
         q->on_filament_change(idx);
     }
-    bool select_preset = !combo->selection_is_changed_according_to_physical_printers();
-    // TODO: ?
-    if (preset_type == Preset::TYPE_FILAMENT && sidebar->is_multifilament()) {
+    const bool select_preset = !combo->selection_is_changed_according_to_physical_printers();
+    switch (preset_selection_followup(preset_type, select_preset, sidebar->is_multifilament())) {
+    case PresetSelectionFollowup::UpdateComboOnly:
         // Only update the plater UI for the 2nd and other filaments.
         combo->update();
-    }
-    else if (select_preset) {
-        if (preset_type == Preset::TYPE_PRINTER) {
+        break;
+
+    case PresetSelectionFollowup::RunPrinterSelectionFlow: {
             PhysicalPrinterCollection& physical_printers = wxGetApp().preset_bundle->physical_printers;
             if(combo->is_selected_physical_printer())
                 preset_name = physical_printers.get_selected_printer_preset_name();
@@ -9577,11 +9578,19 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
                     }
                 }
             }
+            break;
         }
+
+    case PresetSelectionFollowup::RunGenericTabSelection: {
         //BBS
         //wxWindowUpdateLocker noUpdates1(sidebar->print_panel());
         wxWindowUpdateLocker noUpdates2(sidebar->filament_panel());
         wxGetApp().get_tab(preset_type)->select_preset(preset_name);
+        break;
+    }
+
+    case PresetSelectionFollowup::None:
+        break;
     }
 
     // update plater with new config
