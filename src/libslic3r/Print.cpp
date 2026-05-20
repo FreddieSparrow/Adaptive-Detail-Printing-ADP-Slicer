@@ -17,6 +17,7 @@
 #include "Utils.hpp"
 #include "PrintConfig.hpp"
 #include "MaterialType.hpp"
+#include "filament_mixer.h"
 #include "Model.hpp"
 #include "format.hpp"
 #include <float.h>
@@ -1141,6 +1142,19 @@ int Print::get_compatible_filament_type(const std::set<int>& filament_types)
     return HighLowCompatible;
 }
 
+bool Print::is_dynamic_group_reorder() const
+{
+    if (!config().enable_filament_dynamic_map || config().filament_map_mode != FilamentMapMode::fmmAutoForFlush || config().nozzle_diameter.size() <= 1)
+        return false;
+
+    const auto &is_mixed = config().filament_is_mixed.values;
+    for (unsigned int filament_id : extruders()) {
+        if (filament_id < is_mixed.size() && is_mixed[filament_id])
+            return false;
+    }
+    return true;
+}
+
 //BBS: this function is used to check whether multi filament can be printed
 StringObjectException Print::check_multi_filament_valid(const Print& print)
 {
@@ -1154,12 +1168,13 @@ StringObjectException Print::check_multi_filament_valid(const Print& print)
         StringObjectException ret;
 
         for (const auto &objectID_t : print.print_object_ids()) {
-            std::set<int> obj_used_extruder_ids;
+            std::set<unsigned int> obj_used_extruder_ids;
             auto                     print_object = print.get_object(objectID_t);// current object
             if (print_object){
                 auto object_extruders_t = print_object->object_extruders(); // object used extruder
                 for (unsigned int extruder : object_extruders_t) {
-                    obj_used_extruder_ids.insert(static_cast<int>(extruder));
+                    // object_extruders() returns 0-based filament indexes; 0 is the first filament.
+                    obj_used_extruder_ids.insert(extruder);
                 }
             }
 
@@ -2472,6 +2487,40 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
 
         auto objectExtruderMap = getObjectExtruderMap(*this);
+        // Resolve mixed filament virtual slots to physical components so brim
+        // extruder matching works correctly (mixed slot IDs are not present
+        // in printExtruders after ToolOrdering::resolve_mixed_filaments).
+        {
+            const LayerTools *first_lt = nullptr;
+            if (!is_sequential_print() && !tool_ordering.layer_tools().empty())
+                first_lt = &tool_ordering.layer_tools().front();
+
+            std::map<ObjectID, const PrintObject*> obj_by_id;
+            if (m_sequential_print_data) {
+                for (const PrintObject *obj : m_objects)
+                    obj_by_id[obj->id()] = obj;
+            }
+
+            for (auto &[obj_id, ext_1based] : objectExtruderMap) {
+                if (ext_1based == 0)
+                    continue;
+                const LayerTools *lt = first_lt;
+                if (!lt && m_sequential_print_data) {
+                    auto oid_it = obj_by_id.find(obj_id);
+                    if (oid_it != obj_by_id.end()) {
+                        auto it = m_sequential_print_data->object_tool_ordering_map.find(oid_it->second);
+                        if (it != m_sequential_print_data->object_tool_ordering_map.end()
+                            && !it->second.layer_tools().empty())
+                            lt = &it->second.layer_tools().front();
+                    }
+                }
+                if (lt) {
+                    auto it = lt->mixed_filament_resolution.find(ext_1based - 1);
+                    if (it != lt->mixed_filament_resolution.end())
+                        ext_1based = it->second + 1;
+                }
+            }
+        }
         std::vector<std::pair<ObjectID, unsigned int>> objPrintVec;
         for (const PrintInstance* instance : print_object_instances_ordering) {
             const ObjectID& print_object_ID = instance->print_object->id();

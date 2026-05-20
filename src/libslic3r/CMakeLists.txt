@@ -474,6 +474,9 @@ set(lisbslic3r_sources
     GCode/ToolOrderUtils.cpp
     FlushVolPredictor.hpp
     FlushVolPredictor.cpp
+    filament_mixer.h
+    filament_mixer.cpp
+    filament_mixer_model.h
 )
 
 if (APPLE)

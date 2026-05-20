@@ -7,6 +7,14 @@
 #include "GCode/ToolOrderUtils.hpp"
 #include "FilamentGroupUtils.hpp"
 #include "I18N.hpp"
+#include "Preset.hpp"
+#include "PresetBundle.hpp"
+#include "filament_mixer.h"
+#include "LocalesUtils.hpp"
+#include "Utils.hpp"
+
+#include <set>
+#include <fstream>
 
 // #define SLIC3R_DEBUG
 
@@ -20,6 +28,9 @@
 #include <cassert>
 #include <limits>
 #include <algorithm>
+#include <numeric>
+#include <map>
+#include <queue>
 #include <unordered_map>
 
 #include <libslic3r.h>
@@ -83,19 +94,22 @@ bool check_filament_printable_after_group(const std::vector<unsigned int> &used_
 unsigned int LayerTools::wall_filament(const PrintRegion &region) const
 {
 	assert(region.config().wall_filament.value > 0);
-	return ((this->extruder_override == 0) ? region.config().wall_filament.value : this->extruder_override) - 1;
+	unsigned int result = ((this->extruder_override == 0) ? region.config().wall_filament.value : this->extruder_override) - 1;
+	return resolve_mixed(result);
 }
 
 unsigned int LayerTools::sparse_infill_filament(const PrintRegion &region) const
 {
 	assert(region.config().sparse_infill_filament.value > 0);
-	return ((this->extruder_override == 0) ? region.config().sparse_infill_filament.value : this->extruder_override) - 1;
+	unsigned int result = ((this->extruder_override == 0) ? region.config().sparse_infill_filament.value : this->extruder_override) - 1;
+	return resolve_mixed(result);
 }
 
 unsigned int LayerTools::solid_infill_filament(const PrintRegion &region) const
 {
 	assert(region.config().solid_infill_filament.value > 0);
-	return ((this->extruder_override == 0) ? region.config().solid_infill_filament.value : this->extruder_override) - 1;
+	unsigned int result = ((this->extruder_override == 0) ? region.config().solid_infill_filament.value : this->extruder_override) - 1;
+	return resolve_mixed(result);
 }
 
 // Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
@@ -116,8 +130,8 @@ unsigned int LayerTools::extruder(const ExtrusionEntityCollection &extrusions, c
             extruder = region.config().wall_filament.value;
     } else
         extruder = this->extruder_override;
-
-    return (extruder == 0) ? 0 : extruder - 1;
+	unsigned int result = (extruder == 0) ? 0 : extruder - 1;
+	return resolve_mixed(result);
 }
 
 static double calc_max_layer_height(const PrintConfig &config, double max_object_layer_height)
@@ -331,7 +345,9 @@ void ToolOrdering::sort_and_build_data(const Print& print, unsigned int first_ex
     // if first extruder is -1, we can decide the first layer tool order before doing reorder function
     // so we shouldn't reorder first layer in reorder function
     bool reorder_first_layer = (first_extruder != (unsigned int)(-1));
+    this->resolve_mixed_filaments(print.config());
     reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
+    this->enforce_mixed_component_order();
     m_sorted = true;
 
     double max_layer_height = 0.;
@@ -361,8 +377,11 @@ void ToolOrdering::sort_and_build_data(const PrintObject& object , unsigned int 
 {
     // if first extruder is -1, we can decide the first layer tool order before doing reorder function
     // so we shouldn't reorder first layer in reorder function
-    bool reorder_first_layer = (first_extruder != (unsigned int)(-1));
+    //bool reorder_first_layer = (first_extruder != (unsigned int)(-1));
+    bool reorder_first_layer = false; // when by object , the first layer of each object should use the best order, regard less of the filament change for better bed contect
+    this->resolve_mixed_filaments(object.print()->config());
     reorder_extruders_for_minimum_flush_volume(reorder_first_layer);
+    this->enforce_mixed_component_order();
     m_sorted = true;
 
     double max_layer_height = calc_max_layer_height(object.print()->config(), object.config().layer_height);
@@ -651,6 +670,32 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 	it_per_layer_extruder_override = per_layer_extruder_switches.begin();
     unsigned int extruder_override = 0;
 
+    // Pre-compute 1-based IDs of gradient mixed filament slots for per-object tracking.
+    // per_part_slots_1based is the subset of gradient_slots_1based for which per-part gradient is
+    // enabled (filament_mixed_gradient_per_part[i] = true). Used by the per-volume collection
+    // pass that runs alongside the existing per-object pass below.
+    std::set<unsigned int> gradient_slots_1based;
+    std::set<unsigned int> per_part_slots_1based;
+    {
+        const PrintConfig &cfg       = object.print()->config();
+        const auto        &is_mixed  = cfg.filament_is_mixed.values;
+        const auto        &grad_flags = cfg.filament_mixed_gradient.values;
+        const auto        &per_part_flags = cfg.filament_mixed_gradient_per_part.values;
+        const auto        &comp_strs = cfg.filament_mixed_components.values;
+        for (size_t i = 0; i < is_mixed.size(); ++i) {
+            if (!is_mixed[i])
+                continue;
+            auto comps = parse_mixed_components(i < comp_strs.size() ? comp_strs[i] : "");
+            if (comps.size() != 2)
+                continue;
+            if (i >= grad_flags.size() || !grad_flags[i])
+                continue;
+            gradient_slots_1based.insert(static_cast<unsigned int>(i + 1));
+            if (i < per_part_flags.size() && per_part_flags[i])
+                per_part_slots_1based.insert(static_cast<unsigned int>(i + 1));
+        }
+    }
+
     // BBS: collect first layer extruders of an object's wall, which will be used by brim generator
     int layerCount = 0;
     std::vector<int> firstLayerExtruders;
@@ -666,6 +711,9 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
 
         // Store the current extruder override (set to zero if no overriden), so that layer_tools.wiping_extrusions().is_overridable_and_mark() will use it.
         layer_tools.extruder_override = extruder_override;
+
+        // Snapshot extruders before this object's regions to track new additions.
+        const size_t ext_snapshot = layer_tools.extruders.size();
 
         // What extruders are required to print this object layer?
         for (const LayerRegion *layerm : layer->regions()) {
@@ -721,6 +769,49 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
             if (has_solid_infill || has_infill)
                 layer_tools.has_object = true;
         }
+
+        // Record gradient slot usage for this object at this layer (for per-object gradient).
+        if (!gradient_slots_1based.empty()) {
+            size_t layer_idx = static_cast<size_t>(&layer_tools - m_layer_tools.data());
+            std::set<unsigned int> seen;
+            for (size_t ei = ext_snapshot; ei < layer_tools.extruders.size(); ++ei) {
+                unsigned int ext_1based = layer_tools.extruders[ei];
+                if (gradient_slots_1based.count(ext_1based) && seen.insert(ext_1based).second)
+                    m_gradient_object_layers[ext_1based - 1][&object].push_back(layer_idx);
+            }
+        }
+
+        // Per-part gradient: walk LayerRegions and record which (slot, ModelVolume) pairs
+        // contributed to this layer. Only regions tagged by PrintApply.cpp's get_create_region
+        // (i.e. gradient_volume_id().valid()) are considered, so this loop is a strict no-op
+        // unless per_part_gradient is enabled for at least one slot AND the corresponding
+        // ModelObject has >=2 model-part volumes using that slot. The per-object pass above is
+        // unaffected — both runs the same layer's data through orthogonal containers.
+        if (!per_part_slots_1based.empty()) {
+            size_t layer_idx = static_cast<size_t>(&layer_tools - m_layer_tools.data());
+            std::set<std::pair<unsigned int, ObjectID>> vol_seen;
+            for (const LayerRegion *layerm : layer->regions()) {
+                if (layerm->slices.empty())
+                    continue;
+                const PrintRegion &region = layerm->region();
+                ObjectID vol_id = region.gradient_volume_id();
+                if (! vol_id.valid())
+                    continue;
+                const PrintRegionConfig &rcfg = region.config();
+                const unsigned int role_slots[3] = {
+                    static_cast<unsigned int>(rcfg.wall_filament.value),
+                    static_cast<unsigned int>(rcfg.sparse_infill_filament.value),
+                    static_cast<unsigned int>(rcfg.solid_infill_filament.value),
+                };
+                for (unsigned int ext_1based : role_slots) {
+                    if (ext_1based >= 1
+                        && per_part_slots_1based.count(ext_1based)
+                        && vol_seen.insert({ext_1based, vol_id}).second)
+                        m_gradient_volume_layers[ext_1based - 1][{&object, vol_id}].push_back(layer_idx);
+                }
+            }
+        }
+
         layerCount++;
     }
 
@@ -1204,6 +1295,456 @@ FilamentChangeStats ToolOrdering::get_filament_change_stats(FilamentChangeMode m
         break;
     }
     return m_stats_by_single_extruder;
+}
+
+void ToolOrdering::resolve_mixed_filaments(const PrintConfig &config)
+{
+    const auto &is_mixed = config.filament_is_mixed.values;
+    const auto &comp_strs = config.filament_mixed_components.values;
+    const auto &ratio_strs = config.filament_mixed_sublayer_ratios.values;
+
+    if (!has_any_mixed_filament(is_mixed))
+        return;
+
+    struct SlotInfo {
+        std::vector<unsigned int> components; // 1-based
+        std::vector<double>       ratios;
+        std::vector<long long>    accum;     // deficit accumulator (integer, unit: 1e-6 mm)
+    };
+    std::vector<SlotInfo> slots(is_mixed.size());
+    for (size_t i = 0; i < is_mixed.size(); ++i) {
+        if (!is_mixed[i])
+            continue;
+        slots[i].components = parse_mixed_components(i < comp_strs.size() ? comp_strs[i] : "");
+        if (slots[i].components.size() < 2) {
+            slots[i].components.clear();
+            continue;
+        }
+        for (unsigned int cid : slots[i].components) {
+            unsigned int idx0 = cid - 1;
+            if (idx0 >= is_mixed.size() || (idx0 < is_mixed.size() && is_mixed[idx0])) {
+                slots[i].components.clear();
+                break;
+            }
+        }
+        if (slots[i].components.empty())
+            continue;
+        slots[i].ratios = parse_mixed_ratios(
+            i < ratio_strs.size() ? ratio_strs[i] : "", slots[i].components.size());
+        slots[i].accum.assign(slots[i].components.size(), 0LL);
+    }
+
+    const bool sublayer_enabled = config.enable_mixed_color_sublayer.value;
+
+    // Parse gradient settings per slot
+    const auto &gradient_flags = config.filament_mixed_gradient.values;
+    const auto &gradient_range_strs = config.filament_mixed_gradient_range.values;
+    struct GradientInfo { double start = 0.10; double end_val = 0.90; };
+    std::vector<bool> is_gradient(is_mixed.size(), false);
+    std::vector<GradientInfo> gradient_info(is_mixed.size());
+    for (size_t i = 0; i < is_mixed.size(); ++i) {
+        if (!is_mixed[i] || slots[i].components.size() != 2)
+            continue;
+        if (i >= gradient_flags.size() || !gradient_flags[i])
+            continue;
+        is_gradient[i] = true;
+        if (i < gradient_range_strs.size() && !gradient_range_strs[i].empty()) {
+            CNumericLocalesSetter c_locale_setter;
+            float v0 = 0, v1 = 0;
+            if (std::sscanf(gradient_range_strs[i].c_str(), "%f,%f", &v0, &v1) == 2 &&
+                v0 > 0 && v0 < 1.0 && v1 > 0 && v1 < 1.0) {
+                gradient_info[i].start   = v0;
+                gradient_info[i].end_val = v1;
+            }
+        }
+    }
+
+    // Pass 1: identify continuous runs for each gradient slot (Per-Run).
+    // A "run" is a maximal sequence of consecutive layers where the slot appears.
+    struct GradientRunInfo {
+        std::vector<size_t> run_lengths;
+        int                 current_run = -1;
+        size_t              current_idx = 0;
+        bool                prev_appeared = false;
+    };
+    std::map<unsigned int, GradientRunInfo> gradient_runs;
+    for (size_t i = 0; i < is_mixed.size(); ++i)
+        if (is_gradient[i]) gradient_runs[static_cast<unsigned int>(i)] = {};
+
+    if (!gradient_runs.empty()) {
+        for (size_t li = 0; li < m_layer_tools.size(); ++li) {
+            if (li == 0) continue;
+            const auto &lt = m_layer_tools[li];
+            for (auto &[slot, run] : gradient_runs) {
+                bool here = std::find(lt.extruders.begin(), lt.extruders.end(), slot) != lt.extruders.end();
+                if (here) {
+                    if (!run.prev_appeared)
+                        run.run_lengths.push_back(0);
+                    run.run_lengths.back()++;
+                }
+                run.prev_appeared = here;
+            }
+        }
+        for (auto &[slot, run] : gradient_runs) {
+            run.current_run = -1;
+            run.current_idx = 0;
+            run.prev_appeared = false;
+        }
+    }
+
+    // Per-object gradient: pre-compute per-object runs (respecting Z gaps within each object).
+    struct PerObjRunState {
+        std::vector<size_t> run_start_offsets; // index into layer_indices where each run starts
+        std::vector<size_t> run_lengths;
+        int                 current_run = -1;
+        size_t              current_idx = 0;
+    };
+    std::map<unsigned int, std::map<const PrintObject*, PerObjRunState>> per_obj_runs;
+    for (auto &[slot, obj_map] : m_gradient_object_layers) {
+        if (slot >= is_gradient.size() || !is_gradient[slot])
+            continue;
+        for (auto &[obj, layer_indices] : obj_map) {
+            sort_remove_duplicates(layer_indices);
+            // Erase layer 0 — this mutation is also relied upon by the Pass 2 binary_search below.
+            if (!layer_indices.empty() && layer_indices.front() == 0)
+                layer_indices.erase(layer_indices.begin());
+            PerObjRunState st;
+            for (size_t i = 0; i < layer_indices.size(); ++i) {
+                if (i == 0 || layer_indices[i] != layer_indices[i - 1] + 1) {
+                    st.run_start_offsets.push_back(i);
+                    st.run_lengths.push_back(0);
+                }
+                st.run_lengths.back()++;
+            }
+            per_obj_runs[slot][obj] = std::move(st);
+        }
+    }
+
+    // Per-volume gradient: mirror the per-object run-segmentation logic above for
+    // m_gradient_volume_layers. When per_part_gradient is off (or no qualifying volume exists),
+    // m_gradient_volume_layers is empty and per_vol_runs ends up empty too — so all subsequent
+    // checks of `per_vol_runs.find(slot) != end()` will fail and the legacy per-object path
+    // remains the only path taken.
+    using VolumeKey = LayerTools::MixedSubLayerGroup::VolumeKey;
+    std::map<unsigned int, std::map<VolumeKey, PerObjRunState>> per_vol_runs;
+    for (auto &[slot, vol_map] : m_gradient_volume_layers) {
+        if (slot >= is_gradient.size() || !is_gradient[slot])
+            continue;
+        for (auto &[vkey, layer_indices] : vol_map) {
+            sort_remove_duplicates(layer_indices);
+            if (!layer_indices.empty() && layer_indices.front() == 0)
+                layer_indices.erase(layer_indices.begin());
+            PerObjRunState st;
+            for (size_t i = 0; i < layer_indices.size(); ++i) {
+                if (i == 0 || layer_indices[i] != layer_indices[i - 1] + 1) {
+                    st.run_start_offsets.push_back(i);
+                    st.run_lengths.push_back(0);
+                }
+                st.run_lengths.back()++;
+            }
+            per_vol_runs[slot][vkey] = std::move(st);
+        }
+    }
+    // Pass 2: resolve per layer
+    coordf_t prev_print_z = 0.;
+    for (LayerTools &lt : m_layer_tools) {
+        size_t layer_idx = static_cast<size_t>(&lt - m_layer_tools.data());
+
+        // Update gradient run state (skip first layer to match counting).
+        if (layer_idx > 0) {
+            for (auto &[slot, run] : gradient_runs) {
+                bool here = std::find(lt.extruders.begin(), lt.extruders.end(), slot) != lt.extruders.end();
+                if (here && !run.prev_appeared) {
+                    run.current_run++;
+                    run.current_idx = 0;
+                }
+                run.prev_appeared = here;
+            }
+        }
+
+        std::vector<unsigned int> new_extruders;
+        for (unsigned int ext : lt.extruders) {
+            if (ext >= slots.size() || slots[ext].components.empty()) {
+                new_extruders.push_back(ext);
+                continue;
+            }
+            auto &s = slots[ext];
+
+            // Skip sublayer splitting for the first layer to preserve bed adhesion.
+            if (sublayer_enabled && layer_idx > 0) {
+                double lh = lt.print_z - prev_print_z;
+                if (lh <= 0) lh = 0.2;
+                size_t n = s.components.size();
+
+                std::vector<double> sub_heights;
+                bool gradient_last_no_split = false;
+                unsigned int gradient_last_dominant_0b = 0;
+                if (is_gradient[ext] && n == 2) {
+                    auto gr_it = gradient_runs.find(ext);
+                    if (gr_it != gradient_runs.end() && gr_it->second.current_run >= 0 &&
+                        static_cast<size_t>(gr_it->second.current_run) < gr_it->second.run_lengths.size()) {
+                        auto &run  = gr_it->second;
+                        size_t N   = run.run_lengths[run.current_run];
+                        size_t idx = run.current_idx++;
+                        double t   = (N > 0) ? (2.0 * idx + 1.0) / (2.0 * N) : 0.5;
+                        double r1  = gradient_info[ext].start + (gradient_info[ext].end_val - gradient_info[ext].start) * t;
+                        double r2  = 1.0 - r1;
+                        sub_heights.push_back(r1 * lh);
+                        sub_heights.push_back(r2 * lh);
+                        // The sublayer split path sorts components by physical ID ascending;
+                        // the higher-ID component ends up on top (visible surface). If the
+                        // gradient's dominant component has the lower physical ID, splitting
+                        // would put the non-dominant color on the visible top surface. In
+                        // that case, skip the split and print this final run-layer as pure
+                        // dominant color to preserve the gradient appearance.
+                        if (idx == N - 1) {
+                            // When r1 == r2 (exactly 50/50), component[0] is treated as dominant.
+                            size_t dominant = (r1 >= r2) ? 0 : 1;
+                            unsigned int dom_0b = s.components[dominant] - 1;
+                            unsigned int oth_0b = s.components[1 - dominant] - 1;
+                            if (dom_0b < oth_0b) {
+                                gradient_last_no_split = true;
+                                gradient_last_dominant_0b = dom_0b;
+                            }
+                        }
+                    } else {
+                        for (double r : s.ratios)
+                            sub_heights.push_back(r * lh);
+                    }
+                } else {
+                    for (double r : s.ratios)
+                        sub_heights.push_back(r * lh);
+                }
+
+                // Per-part gradient: when this slot has any qualifying volume, the global
+                // no-split short-circuit must NOT bypass MixedSubLayerGroup creation — each
+                // volume needs its own no-split decision in GCode.cpp (a per-volume "last
+                // run-layer" can occur on a different layer index than the per-object one). We
+                // still keep the per-object short-circuit when per_vol_runs[ext] is empty, which
+                // covers the legacy path bit-identically.
+                bool per_vol_active_for_slot = per_vol_runs.find(ext) != per_vol_runs.end()
+                                                && !per_vol_runs[ext].empty();
+                if (gradient_last_no_split && !per_vol_active_for_slot) {
+                    lt.mixed_filament_resolution[ext] = gradient_last_dominant_0b;
+                    new_extruders.push_back(gradient_last_dominant_0b);
+                    continue;
+                }
+
+                LayerTools::MixedSubLayerGroup grp;
+                grp.mixed_slot_0based = ext;
+                grp.is_gradient = is_gradient[ext];
+                for (size_t k = 0; k < s.components.size(); ++k) {
+                    unsigned int comp_0based = s.components[k] - 1;
+                    grp.components_0based.push_back(comp_0based);
+                }
+                grp.sub_heights = sub_heights;
+
+                // Write gradient metadata (run-aware). Both per_object_gradient and
+                // per_volume_gradient are populated independently from their own run-state
+                // machines; the GCode emitter chooses per-region:
+                //  - tagged region (gradient_volume_id valid)  -> per_volume_gradient[{obj, vol}]
+                //  - untagged region (modifier / painted / etc.) -> per_object_gradient[obj]
+                // Populating both keeps the per-object run state correct even when per-volume
+                // takes over for the same (slot, obj), and lets untagged geometry (which is
+                // explicitly NOT split per-volume in v1 per the design doc) keep its legacy
+                // per-object gradient ratios.
+                if (grp.is_gradient) {
+                    auto vol_runs_slot_it = per_vol_runs.find(ext);
+                    if (vol_runs_slot_it != per_vol_runs.end()) {
+                        auto vol_slot_it = m_gradient_volume_layers.find(ext);
+                        for (auto &[vkey, st] : vol_runs_slot_it->second) {
+                            auto &layer_indices = vol_slot_it->second[vkey];
+                            if (!std::binary_search(layer_indices.begin(), layer_indices.end(), layer_idx))
+                                continue;
+                            if (st.current_run < 0 ||
+                                st.current_idx >= st.run_lengths[st.current_run]) {
+                                st.current_run++;
+                                st.current_idx = 0;
+                            }
+                            size_t run_N   = st.run_lengths[st.current_run];
+                            size_t run_idx = st.current_idx++;
+                            grp.per_volume_gradient[vkey] = {
+                                run_N,
+                                run_idx,
+                                gradient_info[ext].start,
+                                gradient_info[ext].end_val,
+                            };
+                        }
+                    }
+
+                    auto runs_slot_it = per_obj_runs.find(ext);
+                    if (runs_slot_it != per_obj_runs.end()) {
+                        auto slot_it = m_gradient_object_layers.find(ext);
+                        for (auto &[obj, st] : runs_slot_it->second) {
+                            auto &layer_indices = slot_it->second[obj];
+                            if (!std::binary_search(layer_indices.begin(), layer_indices.end(), layer_idx))
+                                continue;
+                            if (st.current_run < 0 ||
+                                st.current_idx >= st.run_lengths[st.current_run]) {
+                                st.current_run++;
+                                st.current_idx = 0;
+                            }
+                            size_t run_N  = st.run_lengths[st.current_run];
+                            size_t run_idx = st.current_idx++;
+                            grp.per_object_gradient[obj] = {
+                                run_N,
+                                run_idx,
+                                gradient_info[ext].start,
+                                gradient_info[ext].end_val,
+                            };
+                        }
+                    }
+                }
+
+                if (grp.components_0based.size() > 1) {
+                    unsigned int first_comp_0based = s.components[0] - 1;
+                    std::vector<size_t> idx(grp.components_0based.size());
+                    std::iota(idx.begin(), idx.end(), 0);
+                    std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+                        return grp.components_0based[a] < grp.components_0based[b];
+                    });
+                    std::vector<unsigned int> sorted_comps;
+                    std::vector<double> sorted_heights;
+                    for (size_t i : idx) {
+                        sorted_comps.push_back(grp.components_0based[i]);
+                        sorted_heights.push_back(grp.sub_heights[i]);
+                    }
+                    grp.components_0based = std::move(sorted_comps);
+                    grp.sub_heights = std::move(sorted_heights);
+                    if (grp.is_gradient) {
+                        for (size_t i = 0; i < grp.components_0based.size(); ++i) {
+                            if (grp.components_0based[i] == first_comp_0based) {
+                                grp.gradient_first_sorted_idx = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                for (unsigned int comp : grp.components_0based)
+                    new_extruders.push_back(comp);
+                lt.mixed_sub_layer_groups.push_back(std::move(grp));
+            } else {
+                // Deficit Round-Robin: pick one component per layer.
+                // Weight by layer height so volume ratios stay accurate
+                // even with adaptive layer heights.
+                double lh = lt.print_z - prev_print_z;
+                if (lh <= 0) lh = 0.2;
+                long long lh_i = std::llround(lh * 1e6);
+                // For 2-component gradient on the first layer, use the gradient's
+                // starting ratio instead of the configured mixing ratio so the
+                // selected filament matches the gradient's "from" end.
+                // Only affects the first layer; when sublayer splitting is enabled
+                // (required for gradient), layers 1+ take the sublayer path and
+                // do not touch the DRR accumulator.
+                if (layer_idx == 0 && is_gradient[ext] && s.components.size() == 2) {
+                    double r0 = gradient_info[ext].start;
+                    s.accum[0] += std::llround(r0 * lh_i);
+                    s.accum[1] += std::llround((1.0 - r0) * lh_i);
+                } else {
+                    for (size_t k = 0; k < s.ratios.size(); ++k)
+                        s.accum[k] += std::llround(s.ratios[k] * lh_i);
+                }
+                size_t sel = 0;
+                for (size_t k = 1; k < s.accum.size(); ++k)
+                    if (s.accum[k] > s.accum[sel])
+                        sel = k;
+                s.accum[sel] -= lh_i;
+                unsigned int resolved = s.components[sel] - 1;
+                lt.mixed_filament_resolution[ext] = resolved;
+                new_extruders.push_back(resolved);
+            }
+        }
+        lt.extruders = new_extruders;
+        sort_remove_duplicates(lt.extruders);
+        prev_print_z = lt.print_z;
+    }
+}
+
+void ToolOrdering::enforce_mixed_component_order()
+{
+    for (LayerTools &lt : m_layer_tools) {
+        if (lt.mixed_sub_layer_groups.empty())
+            continue;
+
+        // Build a set of extruders present in lt.extruders for fast lookup.
+        std::set<unsigned int> ext_set(lt.extruders.begin(), lt.extruders.end());
+
+        // 1. Build DAG from mixed group constraints.
+        //    For each group [c0, c1, c2, ...], add edges c0->c1, c1->c2, ...
+        //    Only between components that are both present in lt.extruders.
+        //    Use an edge set to avoid duplicate edges inflating in-degree.
+        std::map<unsigned int, std::vector<unsigned int>> adj;
+        std::map<unsigned int, int> in_degree;
+        std::set<std::pair<unsigned int, unsigned int>> edge_set;
+
+        for (unsigned int ext : lt.extruders)
+            in_degree[ext] = 0;
+
+        for (const auto &grp : lt.mixed_sub_layer_groups) {
+            for (size_t i = 0; i + 1 < grp.components_0based.size(); ++i) {
+                unsigned int a = grp.components_0based[i];
+                unsigned int b = grp.components_0based[i + 1];
+                if (!ext_set.count(a) || !ext_set.count(b))
+                    continue;
+                if (edge_set.insert({a, b}).second) {
+                    adj[a].push_back(b);
+                    in_degree[b] += 1;
+                }
+            }
+        }
+
+        // 2. Record original position (from flush optimizer) as priority.
+        std::map<unsigned int, size_t> orig_pos;
+        for (size_t i = 0; i < lt.extruders.size(); ++i)
+            orig_pos[lt.extruders[i]] = i;
+
+        // 3. Kahn's topological sort with priority queue (prefer original position).
+        auto cmp = [&orig_pos](unsigned int lhs, unsigned int rhs) {
+            return orig_pos[lhs] > orig_pos[rhs]; // min-heap by orig_pos
+        };
+        std::priority_queue<unsigned int, std::vector<unsigned int>, decltype(cmp)> pq(cmp);
+
+        for (unsigned int ext : lt.extruders) {
+            if (in_degree[ext] == 0)
+                pq.push(ext);
+        }
+
+        std::vector<unsigned int> ordered;
+        ordered.reserve(lt.extruders.size());
+        while (!pq.empty()) {
+            unsigned int ext = pq.top();
+            pq.pop();
+            ordered.push_back(ext);
+            if (auto it = adj.find(ext); it != adj.end()) {
+                for (unsigned int next : it->second) {
+                    if (--in_degree[next] == 0)
+                        pq.push(next);
+                }
+            }
+        }
+
+        // Safety: if topological sort didn't produce all elements, keep original order.
+        if (ordered.size() != lt.extruders.size())
+            ordered = lt.extruders;
+
+        // 4. Verify: every mixed group's component order is preserved as subsequence.
+        for (const auto &grp : lt.mixed_sub_layer_groups) {
+            size_t prev_pos = 0;
+            bool valid = true;
+            for (unsigned int c : grp.components_0based) {
+                if (!ext_set.count(c))
+                    continue;
+                auto it = std::find(ordered.begin() + prev_pos, ordered.end(), c);
+                if (it == ordered.end()) { valid = false; break; }
+                prev_pos = (it - ordered.begin()) + 1;
+            }
+            assert(valid && "enforce_mixed_component_order: mixed group subsequence violated");
+            (void)valid;
+        }
+
+        lt.extruders = ordered;
+    }
 }
 
 void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first_layer)
