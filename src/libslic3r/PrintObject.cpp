@@ -1532,6 +1532,17 @@ void PrintObject::detect_surfaces_type()
                     // BOOST_LOG_TRIVIAL(trace) << "Detecting solid surfaces for region " << region_id << " and layer " << layer->print_z;
                     Layer       *layer  = m_layers[idx_layer];
                     LayerRegion *layerm = layer->m_regions[region_id];
+
+                    // ORCA: Fix for issue #11207 - preserve cross-region bridges from make_perimeters
+                    Surfaces preserved_bridges;
+                    if (this->num_printing_regions() > 1) {
+                        for (const Surface &s : layerm->fill_surfaces.surfaces) {
+                            if (s.surface_type == stBottomBridge) {
+                                preserved_bridges.push_back(s);
+                            }
+                        }
+                    }
+
                     // comparison happens against the *full* slices (considering all regions)
                     // unless internal shells are requested
                     Layer       *upper_layer = (idx_layer + 1 < this->layer_count()) ? m_layers[idx_layer + 1] : nullptr;
@@ -1590,7 +1601,7 @@ void PrintObject::detect_surfaces_type()
                                 opening_ex(
                                     diff_ex(
                                         intersection(layerm_slices_surfaces, lower_layer->lslices), // supported
-                                        lower_layer->m_regions[region_id]->slices.surfaces,
+                                        to_expolygons(lower_layer->m_regions[region_id]->slices.surfaces),
                                         ApplySafetyOffset::Yes),
                                     offset),
                                 stBottom);
@@ -1670,6 +1681,18 @@ void PrintObject::detect_surfaces_type()
                     surfaces_append(surfaces_out, std::move(top));
                     surfaces_append(surfaces_out, std::move(bottom));
 
+                    // ORCA: Fix for issue #11207 - restore cross-region bridges that were marked in make_perimeters
+                    if (!preserved_bridges.empty()) {
+                        // Remove any overlapping bottom surfaces and replace with our preserved bridges
+                        Surfaces surfaces_without_bottom;
+                        for (const Surface &s : surfaces_out) {
+                            if (s.surface_type != stBottom && s.surface_type != stBottomBridge)
+                                surfaces_without_bottom.push_back(s);
+                        }
+                        surfaces_out = std::move(surfaces_without_bottom);
+                        surfaces_append(surfaces_out, std::move(preserved_bridges));
+                    }
+
         //            Slic3r::debugf "  layer %d has %d bottom, %d top and %d internal surfaces\n",
         //                $layerm->layer->id, scalar(@bottom), scalar(@top), scalar(@internal) if $Slic3r::debug;
 
@@ -1710,9 +1733,6 @@ void PrintObject::detect_surfaces_type()
                     // Step 1: Find bridge polygons
                     // Current layer (i): Search for stBottomBridge polygons.
                     const Surfaces &bot_surfs = m_layers[i]->m_regions[region_id]->slices.surfaces;
-                    // Next layer (i+1): The layer where stInternal polygons may be re-classified.
-                    Surfaces &top_surfs = m_layers[i + 1]->m_regions[region_id]->slices.surfaces;
-                    
                     // Step 2: Collect the bridge polygons in the current layer region
                     Polygons polygons_bridge;
                     for (const Surface &sbot : bot_surfs) {
@@ -1720,16 +1740,13 @@ void PrintObject::detect_surfaces_type()
                             polygons_append(polygons_bridge, to_polygons(sbot));
                         }
                     }
-                    
+
                     // Step 3: Early termination of loop if no meaningfull bridge found
                     // No bridge polygons found, continue to the next layer
                     if (polygons_bridge.empty())
                         continue;
-                    
+
                     // Step 4: Bottom bridge polygons found - scan and create layer+1 bridge polygon
-                    Surfaces new_surfaces;
-                    new_surfaces.reserve(top_surfs.size());
-                    
                     //filtering parameters here. Filter bridges that are less than 2x external walls and 2xN internal perimeters wide.
                     LayerRegion *layerm = m_layers[i]->m_regions[region_id];
                     int number_of_internal_walls = std::max(0, layerm->m_region->config().wall_loops - 1); // number of internal walls, clamped to a minimum of 0 as a safety precaution
@@ -1740,39 +1757,52 @@ void PrintObject::detect_surfaces_type()
                     // This would also skip generation of very short dual bridge layers (that are shorter than N perimeters), but these are unecessary as the bridge distance is
                     // We could reduce this slightly to account for innacurcies in the clipping operation.
                     // TODO: Monitor GitHub issues to check whether second bridge layers are ommited where they should be generated. If yes, reduce the filtering distance
-                    
-                    // For each surface in the layer above
-                    for (Surface &s_up : top_surfs) {
-                        // Only reclassify stInternal polygons (i.e. what will become later solid and sparse infill)
-                        // Leave the rest unaffected
-                        if (s_up.surface_type != stInternal) {
-                            new_surfaces.push_back(std::move(s_up)); // do not modify them
-                            continue; // continue to the next surface
+
+                    // Lambda: apply extra bridge layer reclassification to target surfaces.
+                    // Finds stInternal surfaces overlapping the bridge polygons and reclassifies
+                    // the overlapping portion as stInternalAfterExternalBridge.
+                    auto apply_extra_bridge = [&](Surfaces &target_surfs) -> bool {
+                        bool found_internal = false;
+                        Surfaces new_surfaces;
+                        new_surfaces.reserve(target_surfs.size());
+                        for (Surface &s_up : target_surfs) {
+                            if (s_up.surface_type != stInternal) {
+                                new_surfaces.push_back(std::move(s_up));
+                                continue;
+                            }
+                            found_internal = true;
+                            Polygons p_up = to_polygons(s_up);
+                            ExPolygons overlap   = intersection_ex(p_up, polygons_bridge, ApplySafetyOffset::Yes);
+                            overlap = offset_ex(shrink_ex(overlap, offset_distance), offset_distance);
+                            ExPolygons remainder = diff_ex(p_up, overlap, ApplySafetyOffset::Yes);
+                            ExPolygons unified_remainder = union_safety_offset_ex(remainder);
+                            for (auto &ex_remainder : unified_remainder) {
+                                new_surfaces.emplace_back(stInternal, ex_remainder);
+                            }
+                            ExPolygons unified_overlap = union_safety_offset_ex(overlap);
+                            for (auto &ex_overlap : unified_overlap) {
+                                new_surfaces.emplace_back(stInternalAfterExternalBridge, ex_overlap);
+                            }
                         }
-                        // Identify stInternal polygons that overlap with the bridging polygons on the layer underneath.
-                        Polygons p_up = to_polygons(s_up);
-                        ExPolygons overlap   = intersection_ex(p_up, polygons_bridge , ApplySafetyOffset::Yes);
-                        // Filter out the resulting candidate bridges based on size. First perform a shrink operation...
-                        // ...followed by an expand operation to bring them back to the original size (positive offset)
-                        overlap = offset_ex(shrink_ex(overlap, offset_distance), offset_distance);
-                        
-                        // Now subtract the filtered new bridge layer from the remaining internal surfaces to create the new internal surface
-                        ExPolygons remainder = diff_ex(p_up, overlap, ApplySafetyOffset::Yes);
-                        
-                        // Remainder stays as stInternal
-                        ExPolygons unified_remainder = union_safety_offset_ex(remainder);
-                        for (auto &ex_remainder : unified_remainder) {
-                            Surface s(stInternal, ex_remainder);
-                            new_surfaces.push_back(std::move(s));
-                        }
-                        // Overlap portion becomes the new polygon type - stInternalAfterExternalBridge
-                        ExPolygons unified_overlap = union_safety_offset_ex(overlap);
-                        for (auto &ex_overlap : unified_overlap) {
-                            Surface s(stInternalAfterExternalBridge, ex_overlap);
-                            new_surfaces.push_back(std::move(s));
+                        if (found_internal)
+                            target_surfs = std::move(new_surfaces);
+                        return found_internal;
+                    };
+
+                    // Try same region first (the common single-material case).
+                    Surfaces &top_surfs = m_layers[i + 1]->m_regions[region_id]->slices.surfaces;
+                    if (!apply_extra_bridge(top_surfs) && this->num_printing_regions() > 1) {
+                        // Cross-region fallback: for face-painted MMU bridges the painted
+                        // region only exists at the bridge layer; layer i+1 has the geometry
+                        // in a different region. Search other regions at layer i+1.
+                        for (size_t other_id = 0; other_id < m_layers[i + 1]->region_count(); ++other_id) {
+                            if (other_id == region_id)
+                                continue;
+                            Surfaces &other_top = m_layers[i + 1]->m_regions[other_id]->slices.surfaces;
+                            if (apply_extra_bridge(other_top))
+                                break;
                         }
                     }
-                    top_surfs = std::move(new_surfaces);
                 }
             }
             );
@@ -1793,6 +1823,20 @@ void PrintObject::detect_surfaces_type()
                     }
                 }
               );
+            }
+            // Cross-region modifications may have changed other regions' slices.surfaces
+            // after their slices_to_fill_surfaces_clipped() already ran. Re-clip those
+            // regions so fill_surfaces reflects the new stBottomBridge surfaces.
+            if (this->num_printing_regions() > 1) {
+                tbb::parallel_for(
+                    tbb::blocked_range<size_t>(0, m_layers.size()),
+                    [this, region_id](const tbb::blocked_range<size_t> &range) {
+                        for (size_t idx = range.begin(); idx < range.end(); ++idx)
+                            for (size_t rid = 0; rid < m_layers[idx]->region_count(); ++rid)
+                                if (rid != region_id)
+                                    m_layers[idx]->m_regions[rid]->slices_to_fill_surfaces_clipped();
+                    }
+                );
             }
         }
         // ==============================================================================================================
