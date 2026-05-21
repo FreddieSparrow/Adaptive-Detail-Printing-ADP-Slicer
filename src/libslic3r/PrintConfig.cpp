@@ -60,6 +60,29 @@ namespace Slic3r {
 // Filament types are defined in MaterialType.
 
 
+bool has_multiple_physical_extruders(const std::vector<int> &physical_extruder_map)
+{
+    if (physical_extruder_map.empty())
+        return false;
+
+    for (int physical_extruder : physical_extruder_map)
+        if (physical_extruder != physical_extruder_map.front())
+            return true;
+
+    return false;
+}
+
+bool has_multiple_physical_extruders(const PrintConfig &config)
+{
+    return has_multiple_physical_extruders(config.physical_extruder_map.values);
+}
+
+bool has_multiple_physical_extruders(const DynamicPrintConfig &config)
+{
+    const ConfigOptionInts *physical_extruder_map = config.option<ConfigOptionInts>("physical_extruder_map");
+    return physical_extruder_map != nullptr && has_multiple_physical_extruders(physical_extruder_map->values);
+}
+
 const std::vector<std::string> filament_extruder_override_keys = {
     // floats
     "filament_retraction_length",
