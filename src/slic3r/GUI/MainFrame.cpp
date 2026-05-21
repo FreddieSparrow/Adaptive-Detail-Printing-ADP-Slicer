@@ -3332,6 +3332,12 @@ void MainFrame::init_menubar_as_editor()
         }, "", nullptr,
         [this]() {return m_plater->is_view3D_shown();; }, this);
 
+    // Practical Flow ratio Test (Dialog)
+    append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Practical Flow Ratio Test"), _L("Practical Flow Ratio calibration test"),
+        [this](wxCommandEvent&) { if (!m_practical_flow_ratio_calib_dlg)
+            m_practical_flow_ratio_calib_dlg = new Practical_Flow_Ratio_Test_Dlg((wxWindow*)this, wxID_ANY, m_plater);
+            m_practical_flow_ratio_calib_dlg->ShowModal();}, "", nullptr, [this]() {return m_plater->is_view3D_shown();; }, this);
+
     // Retraction
     append_menu_item(m_topbar->GetCalibMenu(), wxID_ANY, _L("Retraction"), _L("Retraction"),
         [this](wxCommandEvent&) {

@@ -399,6 +399,7 @@ public:
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
     CutObjectBase cut_id;
+    Calib_Params  calib_params;
 
     Model*                  get_model() { return m_model; }
     const Model*            get_model() const { return m_model; }
@@ -581,6 +582,7 @@ private:
     	assert(this->id() == rhs.id());
         assert(this->config.id() == rhs.config.id());
         assert(this->layer_height_profile.id() == rhs.layer_height_profile.id());
+        assert(this->calib_params == rhs.calib_params);
     }
     explicit ModelObject(ModelObject &&rhs) : ObjectBase(-1), config(-1), layer_height_profile(-1) {
     	assert(this->id().invalid());
@@ -597,6 +599,7 @@ private:
     	assert(this->id() == rhs.id());
         assert(this->config.id() == rhs.config.id());
         assert(this->layer_height_profile.id() == rhs.layer_height_profile.id());
+        assert(this->calib_params == rhs.calib_params);
     }
     ModelObject& operator=(const ModelObject &rhs) {
     	this->assign_copy(rhs);
@@ -609,6 +612,7 @@ private:
     	assert(this->id() == rhs.id());
         assert(this->config.id() == rhs.config.id());
         assert(this->layer_height_profile.id() == rhs.layer_height_profile.id());
+        assert(this->calib_params == rhs.calib_params);
     	return *this;
     }
     ModelObject& operator=(ModelObject &&rhs) {
@@ -622,6 +626,7 @@ private:
     	assert(this->id() == rhs.id());
         assert(this->config.id() == rhs.config.id());
         assert(this->layer_height_profile.id() == rhs.layer_height_profile.id());
+        assert(this->calib_params == rhs.calib_params);
     	return *this;
     }
 	void set_new_unique_id() {
