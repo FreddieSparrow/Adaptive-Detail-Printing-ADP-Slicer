@@ -202,6 +202,26 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode][.]") {
                 REQUIRE(gcode.find("; first layer extrusion width") != std::string::npos);
             }
         }
+        WHEN("gcode_skip_config_block is enabled") {
+            std::string gcode = ::Test::slice({TestMesh::cube_20x20x20}, {
+                { "gcode_skip_config_block",        true },
+                { "gcode_comments",                 true }
+                });
+            THEN("CONFIG_BLOCK markers are absent") {
+                REQUIRE(gcode.find("; CONFIG_BLOCK_START") == std::string::npos);
+                REQUIRE(gcode.find("; CONFIG_BLOCK_END") == std::string::npos);
+            }
+            THEN("Config key-value pairs are absent") {
+                REQUIRE(gcode.find("; layer_height =") == std::string::npos);
+                REQUIRE(gcode.find("; fill_density =") == std::string::npos);
+            }
+            THEN("HEADER_BLOCK is still present") {
+                REQUIRE(gcode.find("; HEADER_BLOCK_START") != std::string::npos);
+            }
+            THEN("EXECUTABLE_BLOCK is still present") {
+                REQUIRE(gcode.find("; EXECUTABLE_BLOCK_START") != std::string::npos);
+            }
+        }
         WHEN("Cooling is enabled and the fan is disabled.") {
 			std::string gcode = ::Test::slice({ TestMesh::cube_20x20x20 }, {
 				{ "cooling",                    true },
