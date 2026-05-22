@@ -169,6 +169,94 @@ enum class SlicingMode
     CloseHoles,
 };
 
+enum class BeltShearMode
+{
+    None,       // No shear on this axis
+    PosCot,     // += cot(α)
+    NegCot,     // -= cot(α)
+    PosTan,     // += tan(α)
+    NegTan,     // -= tan(α)
+};
+
+enum class BeltScaleMode
+{
+    None,       // No scaling (factor = 1)
+    InvSin,     // 1/sin(α)
+    InvCos,     // 1/cos(α)
+    Sin,        // sin(α)
+    Cos,        // cos(α)
+};
+
+enum class BeltAxis
+{
+    X = 0,
+    Y = 1,
+    Z = 2,
+};
+
+// Axis around which the mesh is rotated before slicing, when
+// `belt_slice_rotation` is set.  None disables the rotation stage.
+// Distinct from BeltAxis because BeltAxis carries no "None" semantics.
+enum class BeltRotationAxis
+{
+    None = 0,
+    X    = 1,
+    Y    = 2,
+    Z    = 3,
+};
+
+// Order in which the belt shear and scale matrices are composed.
+// ScaleThenShear: applied to a point p, the result is shear(scale(p)).
+// ShearThenScale: applied to a point p, the result is scale(shear(p)).
+enum class BeltTransformOrder
+{
+    ScaleThenShear = 0,
+    ShearThenScale = 1,
+};
+
+enum class RemapAxis
+{
+    PosX = 0, PosY = 1, PosZ = 2,
+    NegX = 3, NegY = 4, NegZ = 5,
+    RevX = 6, RevY = 7, RevZ = 8,  // Reversed: max - pos
+};
+
+enum class BeltSupportFloorMode
+{
+    None,           // No belt floor awareness
+    GeneratorOnly,  // Only in tree support drop_nodes/contact_points
+    ClipOnly,       // Only post-processing clipping
+    Both,           // Both generator and clipping
+};
+
+enum class BeltSupportZOffsetMode
+{
+    None,           // Don't apply global_z_offset to support layers
+    Unconditional,  // Apply to all support layers
+    RaftOnly,       // Only apply to raft layers
+};
+
+// Selects which plane the slicer treats as the "first layer plane" — the
+// reference surface used to decide which extrusions get first-layer settings
+// (no fan, slow speed, initial-layer accel/jerk, deferred temperature drop).
+//
+// Auto resolves to:
+//   - XY (inactive, legacy behavior) for non-belt printers and for belt
+//     printers with no active belt-side transform.
+//   - BeltAffine for belt printers with any active belt-side affine
+//     transform (Z shear, slicing rotation, or both).
+//
+// XY is also used as an explicit "opt out" mode that forces legacy
+// per-layer first-layer detection even on belt printers.
+enum class FirstLayerPlaneMode
+{
+    Auto = 0,
+    XY,
+    YZ,
+    XZ,
+    BeltAffine,   // formerly BeltShear; renamed to reflect rotation support
+};
+
 enum SupportMaterialPattern {
     smpDefault,
     smpRectilinear, smpRectilinearGrid, smpHoneycomb,
@@ -528,6 +616,15 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltShearMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltScaleMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltAxis)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltRotationAxis)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltTransformOrder)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(RemapAxis)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltSupportFloorMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BeltSupportZOffsetMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FirstLayerPlaneMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialStyle)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialInterfacePattern)
@@ -1471,6 +1568,78 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     PrintConfig,
     (MachineEnvelopeConfig, GCodeConfig),
 
+    // Build plate tilt for off-axis gravity support generation (printer-level setting).
+    ((ConfigOptionFloat,               build_plate_tilt_x))
+    ((ConfigOptionFloat,               build_plate_tilt_y))
+    // Belt printer settings (printer-level).
+    ((ConfigOptionBool,                belt_printer))
+    ((ConfigOptionFloat,               belt_printer_angle))
+    ((ConfigOptionBool,                belt_printer_infinite_y))
+    ((ConfigOptionEnum<BeltShearMode>,  belt_shear_x))
+    ((ConfigOptionFloat,                belt_shear_x_angle))
+    ((ConfigOptionEnum<BeltAxis>,       belt_shear_x_from))
+    ((ConfigOptionBool,                 belt_shear_x_global))
+    ((ConfigOptionEnum<BeltShearMode>,  belt_shear_y))
+    ((ConfigOptionFloat,                belt_shear_y_angle))
+    ((ConfigOptionEnum<BeltAxis>,       belt_shear_y_from))
+    ((ConfigOptionBool,                 belt_shear_y_global))
+    ((ConfigOptionEnum<BeltShearMode>,  belt_shear_z))
+    ((ConfigOptionFloat,                belt_shear_z_angle))
+    ((ConfigOptionEnum<BeltAxis>,       belt_shear_z_from))
+    ((ConfigOptionBool,                 belt_shear_z_global))
+    ((ConfigOptionEnum<BeltScaleMode>,  belt_scale_x))
+    ((ConfigOptionFloat,                belt_scale_x_angle))
+    ((ConfigOptionEnum<BeltScaleMode>,  belt_scale_y))
+    ((ConfigOptionFloat,                belt_scale_y_angle))
+    ((ConfigOptionEnum<BeltScaleMode>,  belt_scale_z))
+    ((ConfigOptionFloat,                belt_scale_z_angle))
+    // Global mesh rotation as an alternative to per-axis shear/scale (isometric
+    // slicing transform).  Composes with shear in the pipeline math; UI gates
+    // them as mutually exclusive.
+    ((ConfigOptionEnum<BeltRotationAxis>, belt_slice_rotation))
+    ((ConfigOptionFloat,                  belt_slice_rotation_angle))
+    ((ConfigOptionBool,                   belt_slice_rotation_global))
+    ((ConfigOptionEnum<RemapAxis>,  preslice_remap_x))
+    ((ConfigOptionEnum<RemapAxis>,  preslice_remap_y))
+    ((ConfigOptionEnum<RemapAxis>,  preslice_remap_z))
+    ((ConfigOptionBool,             preslice_remap_global))
+    ((ConfigOptionEnum<RemapAxis>,  gcode_remap_x))
+    ((ConfigOptionEnum<RemapAxis>,  gcode_remap_y))
+    ((ConfigOptionEnum<RemapAxis>,  gcode_remap_z))
+    ((ConfigOptionEnum<BeltShearMode>,  gcode_shear_x))
+    ((ConfigOptionFloat,                gcode_shear_x_angle))
+    ((ConfigOptionEnum<BeltAxis>,       gcode_shear_x_from))
+    ((ConfigOptionEnum<BeltShearMode>,  gcode_shear_y))
+    ((ConfigOptionFloat,                gcode_shear_y_angle))
+    ((ConfigOptionEnum<BeltAxis>,       gcode_shear_y_from))
+    ((ConfigOptionEnum<BeltShearMode>,  gcode_shear_z))
+    ((ConfigOptionFloat,                gcode_shear_z_angle))
+    ((ConfigOptionEnum<BeltAxis>,       gcode_shear_z_from))
+    ((ConfigOptionEnum<BeltScaleMode>,  gcode_scale_x))
+    ((ConfigOptionFloat,                gcode_scale_x_angle))
+    ((ConfigOptionEnum<BeltScaleMode>,  gcode_scale_y))
+    ((ConfigOptionFloat,                gcode_scale_y_angle))
+    ((ConfigOptionEnum<BeltScaleMode>,  gcode_scale_z))
+    ((ConfigOptionFloat,                gcode_scale_z_angle))
+    ((ConfigOptionEnum<BeltTransformOrder>, belt_mesh_transform_order))
+    ((ConfigOptionEnum<BeltTransformOrder>, belt_gcode_transform_order))
+    ((ConfigOptionEnum<RemapAxis>,      post_gcode_remap_x))
+    ((ConfigOptionEnum<RemapAxis>,      post_gcode_remap_y))
+    ((ConfigOptionEnum<RemapAxis>,      post_gcode_remap_z))
+    ((ConfigOptionBool,                 gcode_back_transform))
+    ((ConfigOptionBool,                 belt_preslice_global))
+    ((ConfigOptionEnum<FirstLayerPlaneMode>, first_layer_plane))
+    ((ConfigOptionFloat,                first_layer_plane_offset))
+    ((ConfigOptionFloat,                first_layer_plane_thickness))
+    ((ConfigOptionBool,                 belt_origin_snap_x))
+    ((ConfigOptionFloat,                belt_origin_offset_x))
+    ((ConfigOptionBool,                 belt_origin_snap_y))
+    ((ConfigOptionFloat,                belt_origin_offset_y))
+    ((ConfigOptionBool,                 belt_origin_snap_z))
+    ((ConfigOptionFloat,                belt_origin_offset_z))
+    ((ConfigOptionFloat,                          belt_support_floor_offset))
+    ((ConfigOptionEnum<BeltSupportFloorMode>,     belt_support_floor_mode))
+    ((ConfigOptionEnum<BeltSupportZOffsetMode>,   belt_support_z_offset_mode))
     //BBS
     ((ConfigOptionInts,               additional_cooling_fan_speed))
     ((ConfigOptionInts,               close_additional_fan_first_x_layers))
