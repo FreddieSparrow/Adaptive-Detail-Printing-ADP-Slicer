@@ -55,6 +55,27 @@ static const Slic3r::Vec3f DEFAULT_EXTRUDER_OFFSET = Slic3r::Vec3f::Zero();
 
 namespace Slic3r {
 
+static int physical_extruder_id_for_tool(int tool_number, const std::vector<int> &filament_maps, const std::vector<int> &physical_extruder_map)
+{
+    int extruder_id = tool_number;
+    if (tool_number >= 0 && tool_number < static_cast<int>(filament_maps.size()))
+        extruder_id = filament_maps[tool_number];
+
+    return extruder_id >= 0 && extruder_id < static_cast<int>(physical_extruder_map.size()) ? physical_extruder_map[extruder_id] : extruder_id;
+}
+
+static bool is_bbl_machine_command_tool(int tool_number)
+{
+    // Some BBL machine G-code uses T<n> service commands that are not slicer toolchanges.
+    return tool_number == 255 || tool_number == 1000 || tool_number == 1001 || tool_number == 1100 || tool_number == 65279 ||
+           tool_number == 65535;
+}
+
+static bool is_bbl_machine_command_tool(const std::string_view command, int tool_number)
+{
+    return GCodeProcessor::s_IsBBLPrinter && (command == "Tx" || command == "Tc" || command == "T?" || is_bbl_machine_command_tool(tool_number));
+}
+
 const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     " FEATURE: ",
     " WIPE_START",
@@ -1249,6 +1270,9 @@ void GCodeProcessor::run_post_process()
         if (cmd.size() >= 2) {
             if (tool_number != -1) {
                 if (tool_number < 0 || (int)m_filament_nozzle_temp.size() <= tool_number) {
+                    if ((m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware) && is_bbl_machine_command_tool(cmd, tool_number))
+                        return;
+
                     // found an invalid value, clamp it to a valid one
                     tool_number = std::clamp<int>(0, m_filament_nozzle_temp.size() - 1, tool_number);
                     // emit warning
@@ -1294,7 +1318,7 @@ void GCodeProcessor::run_post_process()
                             out += " S" + std::to_string(temperature) + "\n";
                             return out;
                         } else {
-                            const int real_tool = tool_number < m_physical_extruder_map.size() ? m_physical_extruder_map[tool_number] : tool_number;
+                            const int real_tool = physical_extruder_id_for_tool(tool_number, m_filament_maps, m_physical_extruder_map);
                             std::string comment = "preheat T" + std::to_string(real_tool) +
                                                 " time: " + std::to_string((int) std::round(time_diffs[0])) + "s";
                             return GCodeWriter::set_temperature(temperature, this->m_flavor, false, real_tool, comment);
@@ -1309,7 +1333,7 @@ void GCodeProcessor::run_post_process()
 
                             float val;
                             if (gline.has_value('T', val) && gline.raw().find("cooldown") != std::string::npos) {
-                                if (static_cast<int>(val) == (tool_number < m_physical_extruder_map.size() ? m_physical_extruder_map[tool_number] : tool_number))
+                                if (static_cast<int>(val) == physical_extruder_id_for_tool(tool_number, m_filament_maps, m_physical_extruder_map))
                                     return std::string("; removed M104\n");
                             }
                         }
@@ -1971,14 +1995,14 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     // sanity check
     if(m_preheat_steps < 1)
         m_preheat_steps = 1;
-    m_result.backtrace_enabled = config.ooze_prevention && m_preheat_time > 0 && (m_is_XL_printer || (!m_single_extruder_multi_material && filament_count > 1));
+    m_physical_extruder_map = config.physical_extruder_map.values;
+    m_result.backtrace_enabled = config.ooze_prevention.value && m_preheat_time > 0 &&
+        (m_is_XL_printer || ((!m_single_extruder_multi_material || has_multiple_physical_extruders(m_physical_extruder_map)) && filament_count > 1));
 
     assert(config.nozzle_volume.size() == config.nozzle_diameter.size());
     m_nozzle_volume.resize(config.nozzle_volume.size());
     for (size_t idx = 0; idx < config.nozzle_volume.size(); ++idx)
         m_nozzle_volume[idx] = config.nozzle_volume.values[idx];
-
-    m_physical_extruder_map = config.physical_extruder_map.values;
 
     m_extruder_offsets.resize(filament_count);
     m_extruder_colors.resize(filament_count);
@@ -5408,9 +5432,8 @@ void GCodeProcessor::process_T(const std::string_view command)
     //TODO: multi switch
     if (command.length() > 1) {
         if (eid < 0 || eid > 254) {
-            //BBS: T255, T1000 and T1100 is used as special command for BBL machine and does not cost time. return directly
-            if ((m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware) && (command == "Tx" || command == "Tc" || command == "T?" ||
-                 eid == 1000 || eid == 1100 || eid == 255))
+            //BBS: some T<n> values are special commands for BBL machines and do not cost time. return directly
+            if ((m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware) && is_bbl_machine_command_tool(command, static_cast<int>(eid)))
                 return;
 
             // T-1 is a valid gcode line for RepRap Firmwares (used to deselects all tools)

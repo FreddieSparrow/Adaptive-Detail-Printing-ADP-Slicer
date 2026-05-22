@@ -1652,6 +1652,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
     (PrintObjectConfig, PrintRegionConfig, PrintConfig)
 )
 
+bool has_multiple_physical_extruders(const std::vector<int> &physical_extruder_map);
+bool has_multiple_physical_extruders(const PrintConfig &config);
+bool has_multiple_physical_extruders(const DynamicPrintConfig &config);
+
 // Validate the FullPrintConfig. Returns an empty string on success, otherwise an error message is returned.
 std::map<std::string, std::string> validate(const FullPrintConfig &config, bool under_cli = false);
 

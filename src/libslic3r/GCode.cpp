@@ -104,6 +104,42 @@ static int hotend_id_for_gcode_placeholder(const FullPrintConfig &config, int ho
     return is_bambu_x2d_printer(config) ? -1 : hotend_id;
 }
 
+static int hotend_id_for_temperature_gcode(const FullPrintConfig &config, int hotend_id)
+{
+    if (hotend_id >= 0 && hotend_id < static_cast<int>(config.physical_extruder_map.values.size()))
+        return config.physical_extruder_map.get_at(hotend_id);
+    return hotend_id;
+}
+
+static bool temperature_gcode_needs_physical_extruder_id(const FullPrintConfig &config)
+{
+    return config.single_extruder_multi_material.value && has_multiple_physical_extruders(config);
+}
+
+static std::string physical_extruder_standby_gcode(const FullPrintConfig &config,
+                                                   int                    old_filament_id,
+                                                   int                    old_extruder_id,
+                                                   int                    new_extruder_id,
+                                                   int                    old_filament_temp)
+{
+    if (!config.ooze_prevention.value || !temperature_gcode_needs_physical_extruder_id(config) || old_filament_id < 0 || old_extruder_id < 0)
+        return std::string();
+
+    const int old_tool_id = hotend_id_for_temperature_gcode(config, old_extruder_id);
+    const int new_tool_id = hotend_id_for_temperature_gcode(config, new_extruder_id);
+    if (old_tool_id == new_tool_id)
+        return std::string();
+
+    int temp = config.idle_temperature.get_at(static_cast<unsigned int>(old_filament_id));
+    if (temp == 0) {
+        if (config.standby_temperature_delta.value == 0)
+            return std::string();
+        temp = old_filament_temp + config.standby_temperature_delta.value;
+    }
+
+    return GCodeWriter::set_temperature(temp, config.gcode_flavor, false, old_tool_id, "cooldown");
+}
+
 Vec2d travel_point_1;
 Vec2d travel_point_2;
 Vec2d travel_point_3;
@@ -268,21 +304,29 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
     {
         std::string gcode;
 
-        unsigned int extruder_id = gcodegen.writer().filament()->id();
+        unsigned int filament_id = gcodegen.writer().filament()->id();
+        const bool use_physical_extruder_id = temperature_gcode_needs_physical_extruder_id(gcodegen.config());
+        int tool_id = use_physical_extruder_id ?
+            hotend_id_for_temperature_gcode(gcodegen.config(), static_cast<int>(gcodegen.writer().filament()->extruder_id())) :
+            static_cast<int>(filament_id);
         const auto& filament_idle_temp = gcodegen.config().idle_temperature;
-        if (filament_idle_temp.get_at(extruder_id) == 0) {
+        if (filament_idle_temp.get_at(filament_id) == 0) {
             // There is no idle temperature defined in filament settings.
             // Use the delta value from print config.
             if (gcodegen.config().standby_temperature_delta.value != 0) {
                 // we assume that heating is always slower than cooling, so no need to block
-                gcode += gcodegen.writer().set_temperature
-                (this->_get_temp(gcodegen) + gcodegen.config().standby_temperature_delta.value, false, extruder_id);
+                int temp = this->_get_temp(gcodegen) + gcodegen.config().standby_temperature_delta.value;
+                gcode += use_physical_extruder_id ?
+                    GCodeWriter::set_temperature(temp, gcodegen.config().gcode_flavor, false, tool_id) :
+                    gcodegen.writer().set_temperature(temp, false, tool_id);
                 gcode.pop_back();
                 gcode += " ;cooldown\n"; // this is a marker for GCodeProcessor, so it can supress the commands when needed
             }
         } else {
             // Use the value from filament settings. That one is absolute, not delta.
-            gcode += gcodegen.writer().set_temperature(filament_idle_temp.get_at(extruder_id), false, extruder_id);
+            gcode += use_physical_extruder_id ?
+                GCodeWriter::set_temperature(filament_idle_temp.get_at(filament_id), gcodegen.config().gcode_flavor, false, tool_id) :
+                gcodegen.writer().set_temperature(filament_idle_temp.get_at(filament_id), false, tool_id);
             gcode.pop_back();
             gcode += " ;cooldown\n"; // this is a marker for GCodeProcessor, so it can supress the commands when needed
         }
@@ -292,9 +336,17 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
     std::string OozePrevention::post_toolchange(GCode& gcodegen)
     {
-        return (gcodegen.config().standby_temperature_delta.value != 0) ?
-            gcodegen.writer().set_temperature(this->_get_temp(gcodegen), true, gcodegen.writer().filament()->id()) :
-            std::string();
+        if (gcodegen.config().standby_temperature_delta.value == 0)
+            return std::string();
+
+        unsigned int filament_id = gcodegen.writer().filament()->id();
+        const bool use_physical_extruder_id = temperature_gcode_needs_physical_extruder_id(gcodegen.config());
+        int tool_id = use_physical_extruder_id ?
+            hotend_id_for_temperature_gcode(gcodegen.config(), static_cast<int>(gcodegen.writer().filament()->extruder_id())) :
+            static_cast<int>(filament_id);
+        return use_physical_extruder_id ?
+            GCodeWriter::set_temperature(this->_get_temp(gcodegen), gcodegen.config().gcode_flavor, true, tool_id) :
+            gcodegen.writer().set_temperature(this->_get_temp(gcodegen), true, tool_id);
     }
 
     int OozePrevention::_get_temp(const GCode &gcodegen) const
@@ -837,11 +889,20 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         end_filament_gcode_str = toolchange_retract_str + object_end_label_temp + end_filament_gcode_str;
 
         std::string wipe_next_start_point_str;
-        bool        need_travel_after_change_filament_gcode = false; // travel need be after the filament changed to get the correct "m_curr_extruder_id"
+        // Travel must happen after changing filament to get the correct m_curr_extruder_id.
+        bool need_travel_after_change_filament_gcode = false;
+
+        const bool has_old_filament = gcodegen.writer().filament() != nullptr;
+        int        old_filament_id  = has_old_filament ? static_cast<int>(gcodegen.writer().filament()->id()) : -1;
+        int        old_extruder_id  = has_old_filament ? static_cast<int>(gcodegen.writer().filament()->extruder_id()) : -1;
+        int        old_filament_temp = 210;
+        if (old_filament_id != -1) {
+            old_filament_temp = gcodegen.on_first_layer() ?
+                gcodegen.config().nozzle_temperature_initial_layer.get_at(old_filament_id) :
+                gcodegen.config().nozzle_temperature.get_at(old_filament_id);
+        }
         if (! change_filament_gcode.empty()) {
             DynamicConfig config;
-            int old_filament_id = gcodegen.writer().filament() ? (int)gcodegen.writer().filament()->id() : -1;
-            int old_extruder_id = gcodegen.writer().filament() ? (int)gcodegen.writer().filament()->extruder_id() : -1;
 
             config.set_key_value("previous_extruder", new ConfigOptionInt(old_filament_id));
             config.set_key_value("next_extruder", new ConfigOptionInt(new_filament_id));
@@ -866,7 +927,6 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                 float new_retract_length = full_config.retraction_length.get_at(new_filament_id);
                 float old_retract_length_toolchange = (old_filament_id != -1) ? full_config.retract_length_toolchange.get_at(old_filament_id) : 0;
                 float new_retract_length_toolchange = full_config.retract_length_toolchange.get_at(new_filament_id);
-                int old_filament_temp = (old_filament_id != -1) ? (gcodegen.on_first_layer()? full_config.nozzle_temperature_initial_layer.get_at(old_filament_id) : full_config.nozzle_temperature.get_at(old_filament_id)) : 210;
                 int new_filament_temp = gcodegen.on_first_layer() ? full_config.nozzle_temperature_initial_layer.get_at(new_filament_id) : full_config.nozzle_temperature.get_at(new_filament_id);
                 Vec3d nozzle_pos = gcode_writer.get_position();
 
@@ -997,6 +1057,11 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         else {
             // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
         }
+        toolchange_gcode_str += physical_extruder_standby_gcode(gcodegen.config(),
+                                                                 old_filament_id,
+                                                                 old_extruder_id,
+                                                                 new_extruder_id,
+                                                                 old_filament_temp);
 
         if (need_travel_after_change_filament_gcode) {
             // move to start_pos for wiping after toolchange
@@ -2274,9 +2339,10 @@ namespace DoExport {
 #endif
 
     static void init_ooze_prevention(const Print &print, OozePrevention &ooze_prevention)
-	{
-	    ooze_prevention.enable = print.config().ooze_prevention.value && ! print.config().single_extruder_multi_material;
-	}
+    {
+        ooze_prevention.enable = print.config().ooze_prevention.value &&
+            (!print.config().single_extruder_multi_material.value || has_multiple_physical_extruders(print.config()));
+    }
 
 	// Fill in print_statistics and return formatted string containing filament statistics to be inserted into G-code comment section.
     static std::string update_print_stats_and_format_filament_stats(
