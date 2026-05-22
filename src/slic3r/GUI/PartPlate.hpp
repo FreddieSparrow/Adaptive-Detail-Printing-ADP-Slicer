@@ -4,6 +4,7 @@
 #include <vector>
 #include <set>
 #include <array>
+#include <string>
 #include <thread>
 #include <mutex>
 
@@ -132,6 +133,13 @@ private:
     PickingModel m_triangles;
     GLModel m_exclude_triangles;
     GLModel m_wrapping_detection_triangles;
+    GLModel m_exclusion_volume_floor_triangles;
+    GLModel m_exclusion_volume_border_triangles;
+    GLModel m_active_exclusion_volume_prisms;
+    GLModel m_exclusion_volume_intersection_triangles;
+    std::string m_exclusion_volume_preview_cache_key;
+    bool m_exclusion_volume_preview_dirty { true };
+    bool m_exclusion_volume_intersections_cleared { false };
     GLModel m_logo_triangles;
     GLModel m_gridlines;
     GLModel m_gridlines_bolder;
@@ -185,6 +193,11 @@ private:
     void render_logo(bool bottom, bool render_cali = true);
     void render_logo_texture(GLTexture &logo_texture, GLModel &logo_buffer, bool bottom);
     void render_exclude_area(bool force_default_color);
+    void render_exclusion_volume_previews(bool force_default_color);
+    void render_exclusion_volume_intersections();
+    void update_exclusion_volume_preview_models();
+    std::string exclusion_volume_preview_cache_key(const std::vector<BedExcludeRegion> &regions) const;
+    double max_broad_phase_intersecting_object_height(const Polygons& regions) const;
     //void render_background_for_picking(const ColorRGBA render_color) const;
     void render_grid(bool bottom);
     void render_wrapping_detection_area(bool force_default_color);
@@ -357,6 +370,8 @@ public:
 
     //check whether instance is outside the plate or not
     bool check_outside(int obj_id, int instance_id, BoundingBoxf3* bounding_box = nullptr);
+    void clear_exclusion_volume_intersections();
+    void invalidate_exclusion_volume_preview();
 
     //judge whether instance is intesected with plate or not
     bool intersect_instance(int obj_id, int instance_id, BoundingBoxf3* bounding_box = nullptr);
@@ -533,6 +548,8 @@ public:
 
         for (std::vector<std::pair<int, int>>::iterator it = instances_outside.begin(); it != instances_outside.end(); ++it)
             instance_outside_set.insert(std::pair(it->first, it->second));
+
+        invalidate_exclusion_volume_preview();
     }
     template<class Archive> void save(Archive& ar) const {
         std::vector<std::pair<int, int>>	objects_and_instances;
