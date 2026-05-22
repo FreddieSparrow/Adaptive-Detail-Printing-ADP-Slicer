@@ -52,7 +52,11 @@ bool LabeledStaticBox::Create(
 #endif
 
     m_label = label;
-    m_scale = FromDIP(100) / 100.f;
+    #if defined(__WXMSW__)
+        m_scale = parent->GetDPIScaleFactor();
+    #else
+        m_scale = FromDIP(100) / 100.f;
+    #endif
     m_pos   = this->GetPosition();
 
     int tW,tH,descent,externalLeading;
@@ -158,22 +162,40 @@ void LabeledStaticBox::DrawBorderAndLabel(wxDC& dc)
     dc.Clear();
 
     wxSize wSz = GetSize();
+    #if defined(__WXMSW__)
+        m_scale = m_parent->GetDPIScaleFactor();
+    #else
+        m_scale = FromDIP(100) / 100.f;
+    #endif
+
+    int tW = 0;
+    int tH = 0;
+
+    if (!m_label.IsEmpty()) {
+        #ifdef __WXMSW__ 
+            dc.SetFont(m_font.Scaled(m_scale));
+        #else
+            dc.SetFont(m_font);
+        #endif
+        wxSize textSize = dc.GetTextExtent(m_label);
+        tW = textSize.GetWidth();
+        tH = textSize.GetHeight();
+    }
 
     dc.SetBrush(*wxTRANSPARENT_BRUSH);
     dc.SetPen(wxPen(border_color.colorForStates(state_handler.states()), m_border_width, wxPENSTYLE_SOLID));
     dc.DrawRoundedRectangle( // Border
         std::max(0, m_pos.x),
-        std::max(0, m_pos.y) + m_label_height * .5,
+        std::max(0, m_pos.y) + tH * .5,
         wSz.GetWidth(),
-        wSz.GetHeight() - m_label_height * .5,
+        wSz.GetHeight() - tH * .5,
         m_radius * m_scale
     );
 
     if (!m_label.IsEmpty()) {
-        dc.SetFont(m_font);
         dc.SetPen(*wxTRANSPARENT_PEN);
         dc.SetBrush(wxBrush(background_color.colorForStates(0)));
-        dc.DrawRectangle(wxRect(7 * m_scale,0 , m_label_width + 7 * m_scale, m_label_height)); // text background
+        dc.DrawRectangle(wxRect(7 * m_scale,0 , tW + 7 * m_scale, tH)); // text background
         // NEEDFIX if text lenght > client size 
         dc.SetTextForeground(text_color.colorForStates(state_handler.states()));
         dc.DrawText(m_label, wxPoint(10 * m_scale, 0));
