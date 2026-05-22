@@ -173,6 +173,11 @@ public:
 
     // Orca: slicing resolution in mm
     double          m_resolution = 0.01;
+    bool            m_has_printable_area_bounds = false;
+    double          m_printable_x_min = 0.;
+    double          m_printable_x_max = 0.;
+    double          m_printable_y_min = 0.;
+    double          m_printable_y_max = 0.;
     
     std::string m_gcode_label_objects_start;
     std::string m_gcode_label_objects_end;
