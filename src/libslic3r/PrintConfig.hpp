@@ -300,6 +300,12 @@ enum class PerimeterGeneratorType
     Arachne
 };
 
+enum class ToolChangeOrderingType
+{
+    Optimized,
+    Cyclic,
+};
+
 // BBS
 enum OverhangFanThreshold {
     Overhang_threshold_none = 0,
@@ -550,6 +556,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PowerLossRecoveryMode)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
@@ -1388,6 +1395,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                single_extruder_multi_material))
     ((ConfigOptionBool,                manual_filament_change))
     ((ConfigOptionBool,                single_extruder_multi_material_priming))
+    ((ConfigOptionEnum<ToolChangeOrderingType>, toolchange_ordering))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
