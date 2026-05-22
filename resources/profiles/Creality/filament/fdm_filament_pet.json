@@ -1,9 +1,12 @@
 {
 	"type": "filament",
 	"name": "fdm_filament_pet",
-	"inherits": "fdm_filament_common",
 	"from": "system",
 	"instantiation": "false",
+	"inherits": "fdm_filament_common",
+	"filament_adhesiveness_category": [
+		"800"
+	],
 	"cool_plate_temp": [
 		"60"
 	],

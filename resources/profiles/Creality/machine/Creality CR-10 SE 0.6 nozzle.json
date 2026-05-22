@@ -1,5 +1,6 @@
 {
 	"type": "machine",
+	"support_multi_bed_types": "1",
 	"name": "Creality CR-10 SE 0.6 nozzle",
 	"inherits": "fdm_creality_common",
 	"from": "system",
@@ -124,5 +125,7 @@
 	"thumbnails": [
 		"96x96",
 		"300x300"
-	]
+	],
+	"bed_model": "creality_cr10se_buildplate_model.stl",
+	"bed_texture": "creality_cr10se_buildplate_texture.svg"
 }
