@@ -65,6 +65,8 @@
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "slic3r/Utils/CrealityPrint.hpp"
+#include "slic3r/Utils/CrealityPrintAgent.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ObjColorUtils.hpp"
 // For stl export
@@ -3479,6 +3481,68 @@ void Sidebar::load_ams_list(MachineObject* obj)
 
 void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
 {
+    // K-series Creality CFS hosts don't bind a MachineObject (BBL cloud-printer
+    // concept), so the dispatch below would early-return. Delegate to
+    // CrealityPrintAgent which queries CFS state and populates filament_ams_list
+    // directly, then surface the result here as the appropriate dialog + refresh.
+    if (auto* preset_bundle = wxGetApp().preset_bundle) {
+        const auto& printer_cfg   = preset_bundle->printers.get_edited_preset().config;
+        const auto* host_type_opt = printer_cfg.option<ConfigOptionEnum<PrintHostType>>("host_type");
+        if (host_type_opt && host_type_opt->value == htCrealityPrint) {
+            wxBusyCursor cursor;
+            auto result = CrealityPrintAgent::sync_filaments_into_ams_list(printer_cfg, preset_bundle);
+            using R = CrealityPrintAgent::CFSAmsListResult;
+            switch (result.status) {
+            case R::NotCfsCapable: {
+                MessageDialog dlg(this,
+                    _L("This printer is not a CFS-capable K-series board, or could not be reached at its configured IP."),
+                    _L("Sync filaments from CFS"), wxOK);
+                dlg.ShowModal();
+                return;
+            }
+            case R::QueryFailed: {
+                MessageDialog dlg(this,
+                    _L("Could not read CFS slot information from the printer.") + "\n" + from_u8(result.detail),
+                    _L("Sync filaments from CFS"), wxOK);
+                dlg.ShowModal();
+                return;
+            }
+            case R::EmptySlots: {
+                MessageDialog dlg(this,
+                    _L("No loaded filament slots detected on the CFS."),
+                    _L("Sync filaments from CFS"), wxOK);
+                dlg.ShowModal();
+                return;
+            }
+            case R::NoMatches: {
+                MessageDialog dlg(this,
+                    _L("CFS slots were read but no compatible filament presets resolved. "
+                       "Enable the relevant filament profiles via the Filaments tickbox in printer settings."),
+                    _L("Sync filaments from CFS"), wxOK);
+                dlg.ShowModal();
+                return;
+            }
+            case R::Success:
+                break;  // fall through to UI refresh below
+            }
+
+            // Mirror the BBL post-sync refresh sequence.
+            auto& filament_presets = preset_bundle->filament_presets;
+            wxGetApp().plater()->on_filament_count_change(result.applied_filament_count);
+            for (auto& c : p->combos_filament)
+                c->update();
+            update_filaments_area_height();
+            Layout();
+            wxGetApp().get_tab(Preset::TYPE_FILAMENT)->select_preset(filament_presets[0]);
+            preset_bundle->export_selections(*wxGetApp().app_config);
+            update_dynamic_filament_list();
+
+            BOOST_LOG_TRIVIAL(warning)
+                << "Sidebar::sync_ams_list: CFS sync applied " << result.applied_filament_count << " slot(s)";
+            return;
+        }
+    }
+
     wxBusyCursor cursor;
     // Force load ams list
     auto obj = wxGetApp().getDeviceManager()->get_selected_machine();
@@ -3718,6 +3782,7 @@ void Sidebar::sync_ams_list(bool is_from_big_sync_btn)
     pop_finsish_sync_ams_dialog();
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "finish pop_finsish_sync_ams_dialog";
 }
+
 
 bool Sidebar::should_show_SEMM_buttons()
 {
@@ -16137,6 +16202,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             pDlg = std::make_unique<ElegooPrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
                                                                storage_paths, storage_names,
                                                                config->get_bool("open_device_tab_post_upload"));
+        } else if (host_type == htCrealityPrint) {
+            pDlg = std::make_unique<CrealityPrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
+                                                                 storage_paths, storage_names,
+                                                                 config->get_bool("open_device_tab_post_upload"),
+                                                                 upload_job.printhost.get());
         } else {
             pDlg = std::make_unique<PrintHostSendDialog>(default_output_file, upload_job.printhost->get_post_upload_actions(), groups,
                                                          storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
