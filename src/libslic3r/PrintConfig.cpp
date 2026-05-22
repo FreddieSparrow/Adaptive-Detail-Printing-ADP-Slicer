@@ -4008,10 +4008,11 @@ void PrintConfigDef::init_fff_params()
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label = L("Infill");
     def->category = L("Extruders");
-    def->tooltip = L("Filament to print internal sparse infill.");
-    def->min = 1;
+    def->tooltip = L("Filament to print internal sparse infill. Set to 'Default' to use the "
+                     "object's filament colour (or the print preset's value when overridden).");
+    def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("sparse_infill_line_width", coFloatOrPercent);
     def->label = L("Sparse infill");
@@ -4720,6 +4721,22 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->set_default_value(new ConfigOptionFloats { 0.4 });
 
+    def = this->add("extruder_line_width", coFloatsOrPercents);
+    def->label = L("Line width override");
+    def->tooltip = L("Per-extruder line width override. Set to a value greater than 0 to force every "
+                     "feature printed by this extruder to use this width, ignoring the print profile's "
+                     "per-feature widths. Useful for toolchangers with different nozzle sizes: enter "
+                     "\"100%\" (recommended) so each extruder uses 100% of its own nozzle diameter, or "
+                     "an absolute mm value (e.g. 0.21 for a 0.2 mm nozzle, 0.84 for a 0.8 mm nozzle). "
+                     "Set to 0 to disable and fall back to the print profile values.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "nozzle_diameter";
+    def->mode = comAdvanced;
+    def->min = 0;
+    def->max = 1000;
+    def->max_literal = 10;
+    def->set_default_value(new ConfigOptionFloatsOrPercents { FloatOrPercent{0.0, false} });
+
     def = this->add("notes", coString);
     def->label = L("Configuration notes");
     def->tooltip = L("You can put here your personal notes. This text will be added to the G-code "
@@ -4884,14 +4901,39 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("enable_per_feature_filament", coBool);
+    def->label = L("Enable per-feature filaments");
+    def->category = L("Extruders");
+    def->tooltip = L("When enabled, you can assign a dedicated filament/toolhead to outer walls, "
+                     "top surfaces, and bottom surfaces independently from the inner walls and "
+                     "solid infill. Useful for toolchanger printers with different nozzle sizes "
+                     "(e.g. a 0.2 mm nozzle for fine outer walls and a 0.4 mm nozzle for the rest). "
+                     "When disabled (default), the per-feature filament dropdowns are hidden and "
+                     "every feature uses the inner wall / solid infill / sparse infill filaments "
+                     "as in stock OrcaSlicer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("wall_filament", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Walls");
+    def->label = L("Inner walls");
     def->category = L("Extruders");
-    def->tooltip = L("Filament to print walls.");
-    def->min = 1;
+    def->tooltip = L("Filament to print inner walls (and outer walls if 'Outer walls' is set to "
+                     "'Default'). 'Default' uses the object's filament colour.");
+    def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("outer_wall_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Outer walls");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print outer walls. Set to 0 to use the same filament as inner walls. "
+                     "This is useful for toolchanger printers with different nozzle sizes: "
+                     "e.g. use a 0.2mm nozzle for fine outer walls and a 0.4mm nozzle for inner walls.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("inner_wall_line_width", coFloatOrPercent);
     def->label = L("Inner wall");
@@ -5647,12 +5689,38 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("solid_infill_filament", coInt);
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
-    def->label = L("Solid infill");
+    def->label = L("Internal solid infill");
     def->category = L("Extruders");
-    def->tooltip = L("Filament to print solid infill.");
-    def->min = 1;
+    def->tooltip = L("Filament to print internal solid infill (the dense layers between sparse infill "
+                     "and the outermost top/bottom surfaces). Top and bottom outermost layers are "
+                     "controlled separately by 'Top surface' and 'Bottom surface' filaments. 'Default' "
+                     "uses the object's filament colour.");
+    def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInt(1));
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("top_surface_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Top surface");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print the outermost top surface layers. Set to 0 to use the same "
+                     "filament as internal solid infill (default). Useful for toolchanger printers "
+                     "with different nozzle sizes: e.g. use a 0.2 mm nozzle for fine top surfaces "
+                     "and a 0.4 mm nozzle for internal solid infill.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("bottom_surface_filament", coInt);
+    def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
+    def->label = L("Bottom surface");
+    def->category = L("Extruders");
+    def->tooltip = L("Filament to print the outermost bottom surface layers. Set to 0 to use the same "
+                     "filament as internal solid infill (default). Useful for toolchanger printers "
+                     "with different nozzle sizes.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("internal_solid_infill_line_width", coFloatOrPercent);
     def->label = L("Internal solid infill");
@@ -7165,7 +7233,7 @@ void PrintConfigDef::init_extruder_option_keys()
 {
     // ConfigOptionFloats, ConfigOptionPercents, ConfigOptionBools, ConfigOptionStrings
     m_extruder_option_keys = {
-        "extruder_type", "nozzle_diameter", "default_nozzle_volume_type", "min_layer_height", "max_layer_height", "extruder_offset",
+        "extruder_type", "nozzle_diameter", "extruder_line_width", "default_nozzle_volume_type", "min_layer_height", "max_layer_height", "extruder_offset",
         "extruder_printable_height", "nozzle_volume", "nozzle_type", "nozzle_flush_dataset",
         "retraction_length", "z_hop", "z_hop_types", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce", "retraction_speed", "deretraction_speed",
         "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
@@ -8339,6 +8407,30 @@ void DynamicPrintConfig::normalize_fdm(int used_filaments)
                 this->option("sparse_infill_filament", true)->setInt(extruder);
             if (!this->has("wall_filament"))
                 this->option("wall_filament", true)->setInt(extruder);
+            if (!this->has("outer_wall_filament"))
+                this->option("outer_wall_filament", true)->setInt(0);
+            if (!this->has("top_surface_filament"))
+                this->option("top_surface_filament", true)->setInt(0);
+            if (!this->has("bottom_surface_filament"))
+                this->option("bottom_surface_filament", true)->setInt(0);
+            if (!this->has("enable_per_feature_filament")) {
+                // Default OFF for new presets, but turn ON when the loaded config already has
+                // any per-feature filament explicitly set (>1, or any value for the optional
+                // outer_wall/top/bottom keys that didn't exist in stock OrcaSlicer). This keeps
+                // existing 3MF projects and MMU presets working without a manual toggle.
+                auto explicit_override = [this](const char* key, int min_explicit) {
+                    auto *o = this->opt<ConfigOptionInt>(key);
+                    return o != nullptr && o->value >= min_explicit;
+                };
+                const bool has_explicit =
+                    explicit_override("wall_filament",          2) ||
+                    explicit_override("sparse_infill_filament", 2) ||
+                    explicit_override("solid_infill_filament",  2) ||
+                    explicit_override("outer_wall_filament",    1) ||
+                    explicit_override("top_surface_filament",   1) ||
+                    explicit_override("bottom_surface_filament",1);
+                this->option<ConfigOptionBool>("enable_per_feature_filament", true)->value = has_explicit;
+            }
             // Don't propagate the current extruder to support.
             // For non-soluble supports, the default "0" extruder means to use the active extruder,
             // for soluble supports one certainly does not want to set the extruder to non-soluble.
@@ -8412,6 +8504,30 @@ void DynamicPrintConfig::normalize_fdm_1()
                 this->option("sparse_infill_filament", true)->setInt(extruder);
             if (!this->has("wall_filament"))
                 this->option("wall_filament", true)->setInt(extruder);
+            if (!this->has("outer_wall_filament"))
+                this->option("outer_wall_filament", true)->setInt(0);
+            if (!this->has("top_surface_filament"))
+                this->option("top_surface_filament", true)->setInt(0);
+            if (!this->has("bottom_surface_filament"))
+                this->option("bottom_surface_filament", true)->setInt(0);
+            if (!this->has("enable_per_feature_filament")) {
+                // Default OFF for new presets, but turn ON when the loaded config already has
+                // any per-feature filament explicitly set (>1, or any value for the optional
+                // outer_wall/top/bottom keys that didn't exist in stock OrcaSlicer). This keeps
+                // existing 3MF projects and MMU presets working without a manual toggle.
+                auto explicit_override = [this](const char* key, int min_explicit) {
+                    auto *o = this->opt<ConfigOptionInt>(key);
+                    return o != nullptr && o->value >= min_explicit;
+                };
+                const bool has_explicit =
+                    explicit_override("wall_filament",          2) ||
+                    explicit_override("sparse_infill_filament", 2) ||
+                    explicit_override("solid_infill_filament",  2) ||
+                    explicit_override("outer_wall_filament",    1) ||
+                    explicit_override("top_surface_filament",   1) ||
+                    explicit_override("bottom_surface_filament",1);
+                this->option<ConfigOptionBool>("enable_per_feature_filament", true)->value = has_explicit;
+            }
             // Don't propagate the current extruder to support.
             // For non-soluble supports, the default "0" extruder means to use the active extruder,
             // for soluble supports one certainly does not want to set the extruder to non-soluble.

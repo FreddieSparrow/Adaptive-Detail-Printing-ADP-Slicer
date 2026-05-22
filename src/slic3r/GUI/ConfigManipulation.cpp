@@ -712,7 +712,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_field("brim_width", have_brim_width);
     toggle_field("brim_flow_ratio", have_brim);
     // wall_filament uses the same logic as in Print::extruders()
-    toggle_field("wall_filament", have_perimeters || have_brim);
+    // Every per-feature filament dropdown is gated by the master toggle.
+    {
+        const bool per_feature = config->opt_bool("enable_per_feature_filament");
+        toggle_field("wall_filament", per_feature && (have_perimeters || have_brim));
+        toggle_field("sparse_infill_filament", per_feature);
+        toggle_field("solid_infill_filament", per_feature);
+        toggle_field("outer_wall_filament", per_feature && have_perimeters);
+        toggle_field("top_surface_filament", per_feature && config->opt_int("top_shell_layers") > 0);
+        toggle_field("bottom_surface_filament", per_feature && config->opt_int("bottom_shell_layers") > 0);
+    }
 
     bool have_brim_ear = (config->opt_enum<BrimType>("brim_type") == btEar);
     const auto brim_width = config->opt_float("brim_width");
@@ -836,8 +845,22 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("enable_tower_interface_cooldown_during_tower",
                 have_prime_tower && config->opt_bool("enable_tower_interface_features"));
 
-    for (auto el : {"wall_filament", "sparse_infill_filament", "solid_infill_filament", "wipe_tower_filament"})
-        toggle_line(el, !bSEMM);
+    // Genuine multi-nozzle printers (e.g. Bambu H2D/X2D) are flagged single_extruder_multi_material
+    // for AMS handling but have independent nozzles, so the per-feature filament feature applies to
+    // them too. Treat any printer with more than one nozzle as eligible regardless of the SEMM flag.
+    const bool is_multi_extruder = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->size() > 1;
+    const bool per_feature_available = !bSEMM || is_multi_extruder;
+    // The wipe-tower selector stays visible whenever the printer is multi-material; the per-feature
+    // toggle is also shown for multi-nozzle printers. Every other per-feature filament row is hidden
+    // unless the toggle is on.
+    toggle_line("wipe_tower_filament", !bSEMM);
+    toggle_line("enable_per_feature_filament", per_feature_available);
+    {
+        const bool per_feature_visible = per_feature_available && config->opt_bool("enable_per_feature_filament");
+        for (auto el : {"wall_filament", "sparse_infill_filament", "solid_infill_filament",
+                        "outer_wall_filament", "top_surface_filament", "bottom_surface_filament"})
+            toggle_line(el, per_feature_visible);
+    }
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
 

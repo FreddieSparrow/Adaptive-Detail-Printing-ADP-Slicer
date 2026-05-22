@@ -9,6 +9,7 @@
 namespace Slic3r {
 
 class PrintObject;
+class PrintConfig;
 
 // Extra spacing of bridge threads, in mm.
 #define BRIDGE_EXTRA_SPACING 0.05
@@ -19,6 +20,7 @@ enum FlowRole {
     frInfill,
     frSolidInfill,
     frTopSolidInfill,
+    frBottomSurface,
     frSupportMaterial,
     frSupportMaterialInterface,
     frSupportTransition,  // BBS
@@ -143,6 +145,15 @@ extern Flow support_material_flow(const PrintObject* object, float layer_height 
 extern Flow support_transition_flow(const PrintObject *object); //BBS
 extern Flow support_material_1st_layer_flow(const PrintObject *object, float layer_height = 0.f);
 extern Flow support_material_interface_flow(const PrintObject *object, float layer_height = 0.f);
+extern ConfigOptionFloatOrPercent nozzle_aware_line_width(
+    const PrintConfig &print_config, bool per_feature_filament,
+    const ConfigOptionFloatOrPercent &width, unsigned int extruder_id);
+
+// Map a 1-based filament index to the 0-based physical extruder/nozzle it is assigned to via
+// filament_map. On multi-nozzle printers there can be more filaments than nozzles, and
+// nozzle_diameter / per-extruder settings are indexed by physical extruder, not by filament.
+// Falls back to direct indexing when the map is not (yet) populated for this filament.
+extern size_t physical_extruder_for_filament(const PrintConfig &print_config, unsigned int filament_id);
 
 }
 
