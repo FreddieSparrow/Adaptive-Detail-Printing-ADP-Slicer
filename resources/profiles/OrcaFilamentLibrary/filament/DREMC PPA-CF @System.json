@@ -1,0 +1,9 @@
+{
+	"type": "filament",
+	"name": "DREMC PPA-CF @System",
+	"inherits": "DREMC PPA-CF @base",
+	"from": "system",
+	"setting_id": "DREMC010_00",
+	"instantiation": "true",
+	"compatible_printers": []
+}
