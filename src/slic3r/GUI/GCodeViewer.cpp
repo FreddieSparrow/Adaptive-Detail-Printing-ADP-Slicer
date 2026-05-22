@@ -1346,16 +1346,20 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     
     // ORCA: Only show filament/color print preview if more than one tool/extruder is actually used in the toolpaths.
     // Only reset back to Toolpaths (FeatureType) if we are currently in ColorPrint and this load is single-tool.
-    if (m_viewer.get_used_extruders_count() > 1) {
-        auto it = std::find(view_type_items.begin(), view_type_items.end(), libvgcode::EViewType::ColorPrint);
-        if (it != view_type_items.end())
-            m_view_type_sel = std::distance(view_type_items.begin(), it);
-        set_view_type(libvgcode::EViewType::ColorPrint);
-    } else if (get_view_type() == libvgcode::EViewType::ColorPrint) {
-        auto it = std::find(view_type_items.begin(), view_type_items.end(), libvgcode::EViewType::FeatureType);
-        if (it != view_type_items.end())
-            m_view_type_sel = std::distance(view_type_items.begin(), it);
-        set_view_type(libvgcode::EViewType::FeatureType);
+    // Apply automatic view type override only once to persist user's manual selection on subsequent loads.
+    if (!m_view_type_auto_set) {
+        if (m_viewer.get_used_extruders_count() > 1) {
+            auto it = std::find(view_type_items.begin(), view_type_items.end(), libvgcode::EViewType::ColorPrint);
+            if (it != view_type_items.end())
+                m_view_type_sel = std::distance(view_type_items.begin(), it);
+            set_view_type(libvgcode::EViewType::ColorPrint);
+        } else if (get_view_type() == libvgcode::EViewType::ColorPrint) {
+            auto it = std::find(view_type_items.begin(), view_type_items.end(), libvgcode::EViewType::FeatureType);
+            if (it != view_type_items.end())
+                m_view_type_sel = std::distance(view_type_items.begin(), it);
+            set_view_type(libvgcode::EViewType::FeatureType);
+        }
+        m_view_type_auto_set = true;
     }
 
     // BBS: data for rendering color arrangement recommendation
@@ -1453,18 +1457,6 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
         if (time == 0.0f ||
             short_time(get_time_dhms(time)) == short_time(get_time_dhms(m_print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].time)))
             m_viewer.set_time_mode(libvgcode::convert(PrintEstimatedStatistics::ETimeMode::Normal));
-    }
-
-    // set to color print by default if use multi extruders
-    if (m_viewer.get_used_extruders_count() > 1) {
-        for (int i = 0; i < view_type_items.size(); i++) {
-            if (view_type_items[i] == libvgcode::EViewType::ColorPrint) {
-                m_view_type_sel = i;
-                break;
-            }
-        }
-
-        set_view_type(libvgcode::EViewType::ColorPrint);
     }
 
     bool only_gcode_3mf = false;
