@@ -1,0 +1,7 @@
+{
+  "model_name": "adp_demo_box",
+  "height_mm": 1.6,
+  "outer_loops": [
+    [[0, 0], [40, 0], [40, 30], [0, 30]]
+  ]
+}
